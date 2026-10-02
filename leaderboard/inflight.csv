@@ -1,0 +1,6 @@
+method,mean_rank,wins,cases,mean_value
+da_cbpe,2.0,2,4,0.020790127514291674
+labels_to_date,2.25,1,4,0.019081081098678752
+latest_complete_cohort,2.25,1,4,0.025237392572668625
+cbpe,4.0,0,4,0.0324443054510929
+reference,4.5,0,4,0.04339653171010517

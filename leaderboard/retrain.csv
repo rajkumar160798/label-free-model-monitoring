@@ -1,0 +1,10 @@
+method,mean_rank,wins,cases,mean_value
+every_k (best k),1.5,5,8,0.09399566045579998
+retrain on latest_complete_cohort alarm,2.75,0,8,0.1168286229644063
+retrain on recent_arrivals alarm,3.25,2,8,0.12836021698799752
+never,4.375,1,8,0.17892062797242694
+retrain on domain_classifier,4.375,0,8,0.18372618140650052
+retrain on psi_max,4.375,0,8,0.19656967079834867
+retrain on cbpe alarm,4.625,0,8,0.18895302255588928
+retrain on score_ks,5.0,0,8,0.1977468001503427
+always,5.25,0,8,0.20472620580873094

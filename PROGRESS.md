@@ -23,8 +23,8 @@ Where the project stands and what comes next. Read this together with [DATA.md](
 | `src/lfmm/detectors.py` | Detectors: univariate tests, PSI, score KS, domain classifier, MMD, ADWIN on scores, ADWIN on arrived errors, estimator alarms |
 | `src/lfmm/harness.py` | `deploy`, `run_estimation`, `run_inflight`, `run_detection`; block-bootstrap intervals (`Result.bootstrap_mae`, `Result.compare`) |
 | `src/lfmm/retrain.py` | Retrain-or-not: model bank, policies, hindsight oracle (dynamic programming), regret |
-| `scripts/run_*.py` | One script per task, writing to `results/`; `make_figures.py` writes `figures/` |
-| `tests/` | 35 tests: estimator maths, leakage, detectors, oracle vs brute force, da_cbpe on synthetic concept shift |
+| `scripts/run_*.py` | One script per task, writing to `results/`; `make_figures.py` writes `figures/`; `build_leaderboard.py` writes `leaderboard/` |
+| `tests/` | 36 tests (1 strict expected failure tracking the calendar-shock limitation): estimator maths, leakage, detectors, oracle vs brute force, da_cbpe on synthetic concept shift |
 
 ## Design decisions
 
@@ -121,16 +121,50 @@ With constant delay it reduces to recalibrating on the latest complete labels.
 
 In plain terms: on the in-flight book, da_cbpe beats label-free CBPE in every case, and it ties or beats the label-based baseline while not having to wait for complete cohorts. On next-batch estimation the advantage isn't statistically clear.
 
-**Known limitation: calendar-time shocks.** In COVID, forbearance pushed loans of every age into 90-days-late status within a few months. The method assumes defaults arrive over a loan's life at the usual pace, so it read the burst as the early edge of a much bigger wave: in-flight estimate about 10% against a true 4.3% (figures/freddie_2007_default_rate.png). Chain-ladder reserving has the same weakness with "calendar-year effects". The obvious fix is to model a calendar-time hazard alongside the age pattern.
+**Known limitation: calendar-time shocks.** In COVID, forbearance pushed loans of every age into 90-days-late status within a few months. The method assumes defaults arrive over a loan's life at the usual pace, so it read the burst as the early edge of a much bigger wave: in-flight estimate about 10% against a true 4.3% (figures/freddie_2007_default_rate.png). Chain-ladder reserving has the same weakness with "calendar-year effects".
+
+Reproduced on synthetic data (`calendar_shock_stream` in tests/test_core.py: a 4-month burst of extra defaults across all active loans). Two fixes were tried and **did not work**, so neither was kept:
+- κ = speed-up of arrivals in the last 3 months: the burst is reattributed to δ once it leaves the 3-month window.
+- κ_t per calendar month with a ridge penalty (age-period on the arrival *timing*): still worse than plain da_cbpe. The burst adds *extra* defaults, and in this model *whether* a loan defaults can only come from δ; κ only changes *when*.
+
+The fix needs a discrete-time hazard model: monthly default hazard = baseline-by-age × e^(δ + κ_t), with eventual default = 1 − Π(1 − hazard) and κ = 0 assumed for future months. `test_delay_adjusted_cbpe_does_not_overshoot_after_calendar_burst` is a strict expected failure that tracks this; it will flag when a fix works.
 
 Figures: `figures/freddie_2007_default_rate.png` (next batch and in-flight book) and `figures/freddie_2007_auc.png`.
 
+## All 8 experiments: detection and retraining (2026-10-02)
+
+**Detection** (16 cases = 8 experiments × 2 event types; all detectors, single pass per deployment). Medians across cases:
+
+| Detector | Rank correlation with real degradation | Alarm rate | Precision | Recall |
+|---|---|---|---|---|
+| **da_cbpe alarm (ours)** | **0.56** | 28% | **0.88** | 0.50 |
+| CBPE alarm | 0.54 | 7% | 0.84 | 0.09 |
+| ADWIN on scores | 0.50 | 11% | 0.71 | 0.14 |
+| score KS | 0.49 | 100% | 0.49 | 1.00 |
+| univariate tests | 0.38 | 100% | 0.49 | 1.00 |
+| PSI | 0.36 | 100% | 0.49 | 1.00 |
+| MMD | 0.34 | 100% | 0.52 | 1.00 |
+| domain classifier | 0.33 | 100% | 0.52 | 1.00 |
+| latest complete cohort alarm | 0.31 | 42% | 0.71 | 0.71 |
+| recent arrivals alarm | 0.20 | 30% | 0.65 | 0.39 |
+| ADWIN on arrived errors | 0.10 | 13% | 0.84 | 0.25 |
+
+- Every input-drift test fires in every period of the median case: on real data, "the inputs changed" is always true and says little about whether the model got worse.
+- The delay-adjusted alarm is the only one that both tracks real degradation and fires selectively.
+- ADWIN on arrived errors, the classic streaming setup, ranks worst: under label delay it sees too little, too late.
+- Event rates vary from 0% (homecredit AUC never drops 0.01) to 100% (ecom AUC always does); read precision against the event rate.
+
+**Retraining** (regret vs the hindsight-optimal schedule; ρ = retrain cost relative to the average gain of one retrain). See `leaderboard/LEADERBOARD.md`.
+- At moderate cost (ρ = 1), a fixed calendar (best k chosen in hindsight) is the best policy in 5 of 8 experiments. Monitor-triggered retraining wins only on freddie_2007 (retrain when recently arrived labels show an AUC drop).
+- Retraining on input-drift alarms is effectively "always retrain", since those tests always fire: good when retraining is free, worst once it costs anything.
+- On freddie_2016 and tabred_ecom, retraining every period is *worse* than never: newer models train on less or less relevant data.
+- BRFSS retraining is slow (~44 models plus alarm policies, over an hour under load); `scripts/run_retrain.py brfss_2014 --fast` skips the domain-classifier policy if needed.
+
 ## Next steps
 
-1. Detection and retrain results for all 8 experiments (runs in progress; see below once filled in).
-2. Fix the calendar-time weakness in da_cbpe (time-varying hazard), then recheck COVID.
-3. Speed up detection: compute metric-independent detectors once per deployment, not once per event metric.
-4. Calibrated alarm thresholds (from held-out reference periods) instead of rules of thumb.
-5. Repeated model seeds (the intervals so far cover period-to-period variation only).
-6. Regression support, to add the five TabReD regression datasets.
-7. Release: license choice, PyPI package, leaderboard site, workshop paper draft.
+1. **Hazard-based da_cbpe** (age-period discrete-time model) to fix calendar-time shocks; the strict xfail test will flag success.
+2. Calibrated alarm thresholds (from held-out reference periods) instead of rules of thumb.
+3. Repeated model seeds (the intervals so far cover period-to-period variation only).
+4. Regression support, to add the five TabReD regression datasets.
+5. Speed: cache model banks to disk; the domain-classifier and MMD detectors dominate detection time.
+6. Release: license choice, PyPI package, leaderboard site (from `leaderboard/`), workshop paper draft.

@@ -2,6 +2,7 @@
 
     uv run python scripts/run_retrain.py            # all experiments (slow: trains one model per period)
     uv run python scripts/run_retrain.py tlc_2019
+    uv run python scripts/run_retrain.py brfss_2014 --fast   # without the domain-classifier policy
 
 For each experiment (src/lfmm/experiments.py), builds the model bank, evaluates
 fixed schedules, alarm-triggered retraining and the hindsight oracle, and writes
@@ -27,13 +28,13 @@ RESULTS = Path(__file__).resolve().parents[1] / "results"
 EVERY = {"W": (2, 4), "M": (3, 6, 12), "Q": (2, 4, 8), "Y": (2, 3)}
 
 
-def policies_for(exp) -> list:
+def policies_for(exp, fast: bool = False) -> list:
     metric = "roc_auc" if "roc_auc" in exp.events else next(iter(exp.events))
     delta = exp.events[metric][1]
     alarm = lambda est: partial(EstimatorAlarm, est(), metric, delta)  # noqa: E731
     return [
         Never(), Always(), *[Every(n) for n in EVERY[exp.freq]],
-        OnAlarm(PSI), OnAlarm(ScoreKS), OnAlarm(DomainClassifier),
+        OnAlarm(PSI), OnAlarm(ScoreKS), *([] if fast else [OnAlarm(DomainClassifier)]),
         OnAlarm(alarm(CBPE), f"cbpe:{metric}"),
         OnAlarm(alarm(lambda: LatestCompleteCohort(freq="M")), f"latest_complete_cohort:{metric}"),
         OnAlarm(alarm(RecentArrivals), f"recent_arrivals:{metric}"),
@@ -43,13 +44,15 @@ def policies_for(exp) -> list:
 def main(names: list[str]) -> None:
     RESULTS.mkdir(exist_ok=True)
     pd.set_option("display.width", 200)
+    fast = "--fast" in names  # skip the domain-classifier policy (slowest on big streams)
+    names = [n for n in names if n != "--fast"]
     for name in names or list(EXPERIMENTS):
         exp = EXPERIMENTS[name]
         t0 = time.time()
         stream = exp.load()
         print(f"\n=== {name}: building model bank ===")
         bank = build_bank(stream, **exp.deploy_kwargs())
-        res = evaluate_policies(bank, policies_for(exp))
+        res = evaluate_policies(bank, policies_for(exp, fast))
         unit = (f"gain per retrain={res.attrs['gain_per_retrain']:.5f}" if res.attrs["retraining_helps"]
                 else "retraining every period is WORSE than never; rho unit = 1% of a period's loss")
         print(f"{res.attrs['periods']} periods, loss={res.attrs['loss']}, {unit}, {time.time() - t0:.0f}s")

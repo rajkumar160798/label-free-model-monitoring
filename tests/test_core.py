@@ -124,3 +124,42 @@ def test_inflight_posterior_beats_ignoring_or_trusting_early_labels():
     assert summ.loc["da_cbpe", "mae"] < 0.5 * summ.loc["cbpe", "mae"], summ
     assert summ.loc["da_cbpe", "mae"] < 0.5 * summ.loc["labels_to_date", "mae"], summ
     assert summ.loc["labels_to_date", "bias"] < 0  # counting pending labels as negative
+
+
+def calendar_shock_stream(n_months=72, per_month=3000, burst=(40, 44), burst_hazard=0.03, horizon=24, seed=0):
+    """Defaults by month with a calendar-time burst that hits every active loan.
+
+    Base: each loan has an eventual-default probability p (logistic in x) and, if it
+    defaults, does so at a uniform month of age 1..horizon. During calendar months in
+    ``burst`` every loan still active and not yet defaulted also defaults with extra
+    probability ``burst_hazard`` per month. Labels: positive known at the default
+    month, negative at the horizon.
+    """
+    rng = np.random.default_rng(seed)
+    start = np.repeat(np.arange(n_months), per_month)
+    x = rng.normal(0, 1, len(start))
+    p = 1 / (1 + np.exp(-(-3.5 + 1.2 * x)))
+    will = rng.random(len(start)) < p
+    t_def = np.where(will, start + rng.integers(1, horizon + 1, len(start)), 10**6)
+    for m in range(*burst):  # burst month m: active, not-yet-defaulted loans may default now
+        active = (start < m) & (start + horizon >= m) & (t_def > m)
+        hit = active & (rng.random(len(start)) < burst_hazard)
+        t_def[hit] = m
+    y = (t_def <= start + horizon).astype(float)
+    event_time = (np.datetime64("2010-01-01", "M") + start).astype("datetime64[ns]")
+    label_month = np.where(y == 1, t_def, start + horizon)
+    label_time = (np.datetime64("2010-01-01", "M") + label_month).astype("datetime64[ns]")
+    return Stream("calendar", pd.DataFrame({"x": x}), y, event_time, label_time)
+
+
+@pytest.mark.xfail(reason="known limitation: a calendar-time burst of extra defaults (e.g. COVID "
+                          "forbearance) is read as a lasting shift; needs an age-period hazard model",
+                   strict=True)
+def test_delay_adjusted_cbpe_does_not_overshoot_after_calendar_burst():
+    from lfmm.estimators import DelayAdjustedCBPE, LatestCompleteCohort
+
+    s = calendar_shock_stream()
+    res = run_estimation(s, "2012-07-01", freq="Q", metrics=("prevalence",),
+                         estimators=[DelayAdjustedCBPE(), LatestCompleteCohort(freq="M")])
+    err = res.summary().loc["prevalence", "mae"]
+    assert err["da_cbpe"] <= err["latest_complete_cohort"], err

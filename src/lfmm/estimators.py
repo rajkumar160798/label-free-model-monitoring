@@ -248,15 +248,14 @@ class DelayAdjustedCBPE(CBPE):
         self.rng = np.random.default_rng(seed)
         self.last_delta = 0.0
 
-    def _fit(self, history: History) -> None:
-        """Arrival curves at each history row's age (F, G) and the offset delta."""
-        from scipy.optimize import minimize_scalar
-
+    def _prepare(self, history: History) -> dict | None:
+        """Arrival curves at each history row's age (sets self.F, self.G) and the rows to
+        fit the offset on. None when there is not enough labeled history (plain CBPE)."""
         n = len(history.proba)
         self.F, self.G, self.last_delta = np.zeros(n), np.zeros(n), 0.0
         known = ~np.isnan(history.y_known)
         if not known.any():
-            return
+            return None
         delay = (history.label_time[known] - history.event_time[known]).astype("timedelta64[D]")
         horizon = delay.max()
         age = (history.now - history.event_time).astype("timedelta64[D]")
@@ -265,25 +264,33 @@ class DelayAdjustedCBPE(CBPE):
         d_m = (history.label_time[mature] - history.event_time[mature]).astype("timedelta64[D]")
         pos_m = history.y_known[mature] == 1
         if pos_m.sum() < 10 or (~pos_m).sum() < 10:
-            return
+            return None
         f_delays, g_delays = np.sort(d_m[pos_m]), np.sort(d_m[~pos_m])
-        F = np.searchsorted(f_delays, age, side="right") / len(f_delays)
-        G = np.searchsorted(g_delays, age, side="right") / len(g_delays)
-        self.F, self.G = F, G
+        self.F = np.searchsorted(f_delays, age, side="right") / len(f_delays)
+        self.G = np.searchsorted(g_delays, age, side="right") / len(g_delays)
 
-        informative = known | (F > 0.05)
-        never = ~known & (F > 0.999) & (G > 0.999)  # should have resolved but never will
+        informative = known | (self.F > 0.05)
+        never = ~known & (self.F > 0.999) & (self.G > 0.999)  # should have resolved but never will
         informative &= ~never
         if informative.sum() < 100:
-            return
+            return None
         newest = history.event_time[informative].max()
         rows = np.flatnonzero(informative & (history.event_time > newest - self.window))
         if len(rows) > self.max_rows:
             rows = self.rng.choice(rows, self.max_rows, replace=False)
+        return {"rows": rows, "age": age, "f_delays": f_delays,
+                "z": _logit(self.calibrator.predict(history.proba[rows])),
+                "y": history.y_known[rows]}
 
-        z = _logit(self.calibrator.predict(history.proba[rows]))
-        y = history.y_known[rows]
-        F_r, G_r = F[rows], G[rows]
+    def _fit(self, history: History) -> None:
+        """Fit the offset delta by maximum likelihood (see class docstring)."""
+        from scipy.optimize import minimize_scalar
+
+        prep = self._prepare(history)
+        if prep is None:
+            return
+        rows, z, y = prep["rows"], prep["z"], prep["y"]
+        F_r, G_r = self.F[rows], self.G[rows]
         is_pos, is_neg, is_unk = y == 1, y == 0, np.isnan(y)
 
         def nll(delta: float) -> float:
