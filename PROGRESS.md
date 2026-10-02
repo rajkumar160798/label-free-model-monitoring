@@ -200,11 +200,11 @@ Before submission:
 - PyPI name `lfmm` (free as of 2026-10-02). Core deps: numpy, pandas, polars, pyarrow, scikit-learn, scipy. Extras: `data` (folktables, pyreadstat, requests), `streaming` (river), `all`.
 - Tested from the built wheel in clean environments: Python 3.10 with the minimum versions (numpy 1.24, pandas 2.0, scikit-learn 1.4, scipy 1.10, polars 1.0, pyarrow 14), and Python 3.13 with the latest versions and all extras. README code blocks run on both.
 - `pytest` skips 6 slow tests by default (`-m slow` runs them). CI: `.github/workflows/tests.yml`.
-- Publishing: `.github/workflows/publish.yml` publishes on a GitHub release via PyPI trusted publishing (no token). One-time PyPI setup needed by the account owner.
+- Publishing: `.github/workflows/publish.yml` publishes on a GitHub release via PyPI trusted publishing (no token); the trusted publisher is configured on PyPI. **v0.1.0 published 2026-10-02**, verified with `pip install lfmm` in a fresh environment. To release a new version: bump `version` in pyproject.toml, add a CHANGELOG entry, push, create a GitHub release `vX.Y.Z`.
 
 ## Next steps
 
-1. Release: publish v0.1.0 to PyPI (package ready, see "Packaging" below), leaderboard site from `leaderboard/`, arXiv upload bundle.
+1. Release: ~~PyPI~~ (v0.1.0 live since 2026-10-02: https://pypi.org/project/lfmm/), leaderboard site from `leaderboard/`, arXiv upload bundle (endorsement requested from Praveen Kumar Myakala).
 2. Detection and retraining over several seeds (estimation already has 5).
 3. Calibrated alarm thresholds (held-out reference periods) instead of rules of thumb.
 4. Regression support, to add the five TabReD regression datasets.
