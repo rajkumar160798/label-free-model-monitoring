@@ -9,7 +9,7 @@ A benchmark and toolkit for **performance estimation, drift detection and retrai
 Most monitoring methods are evaluated on artificially injected drift with every label available immediately. `lfmm` replays **real, timestamped data** as streams in which a monitor sees each label only when it would have arrived in practice, including the *natural* label delay of mortgage defaults, and scores monitors on four tasks.
 
 - Paper draft: [paper/main.pdf](https://github.com/rajkumar160798/label-free-model-monitoring/blob/master/paper/main.pdf)
-- Leaderboard: [leaderboard/LEADERBOARD.md](https://github.com/rajkumar160798/label-free-model-monitoring/blob/master/leaderboard/LEADERBOARD.md)
+- **Leaderboard:** https://rajkumar160798.github.io/label-free-model-monitoring/ ([submit a method](https://rajkumar160798.github.io/label-free-model-monitoring/submit.html), [CONTRIBUTING.md](https://github.com/rajkumar160798/label-free-model-monitoring/blob/master/CONTRIBUTING.md))
 
 ## Install
 

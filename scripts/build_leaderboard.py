@@ -10,6 +10,7 @@ leaderboard/LEADERBOARD.md and one CSV per task.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -42,38 +43,80 @@ def _aggregate(scores: pd.DataFrame, method: str, lower_is_better: bool) -> pd.D
     scores["best"] = scores["rank"] == 1
     out = scores.groupby(method).agg(mean_rank=("rank", "mean"), wins=("best", "sum"),
                                      cases=("case", "nunique"), mean_value=("value", "mean"))
-    return out.sort_values(["mean_rank", "wins"], ascending=[True, False])
+    # Methods evaluated on every case are ranked first: a method should not top the board by
+    # being scored on fewer, easier cases. Partial ones (e.g. accuracy-only estimators,
+    # submissions still being run) follow, ordered the same way.
+    out["full_coverage"] = out["cases"] == scores["case"].nunique()
+    return out.sort_values(["full_coverage", "mean_rank", "wins"], ascending=[False, True, False])
 
 
-def estimation() -> tuple[pd.DataFrame, pd.DataFrame]:
-    rows = []
+def submissions() -> list[dict]:
+    """meta.json of every submitted method under results/submissions/."""
+    out = []
+    for meta in sorted((RESULTS / "submissions").glob("*/meta.json")):
+        m = json.loads(meta.read_text(encoding="utf-8"))
+        m["dir"] = meta.parent
+        out.append(m)
+    return out
+
+
+def _estimation_files(kind: str):
+    """(experiment, summary csv) for baselines and submissions; kind = estimation | inflight."""
     for name in EXPERIMENTS:
-        f = RESULTS / f"{name}_summary.csv"
-        if f.exists():
+        base = RESULTS / (f"{name}_summary.csv" if kind == "estimation" else f"inflight_{name}_summary.csv")
+        if base.exists():
+            yield name, base
+        for sub in submissions():
+            f = sub["dir"] / f"{kind}_{name}_summary.csv"
+            if f.exists():
+                yield name, f
+
+
+def case_rows(task: str) -> pd.DataFrame:
+    """One row per (case, method) with the score used for ranking."""
+    rows = []
+    if task in ("estimation", "inflight"):
+        for name, f in _estimation_files(task):
             d = pd.read_csv(f)
             rows += [{"case": f"{name}/{r.metric}", "method": r.estimator, "value": r.mae}
                      for r in d.itertuples()]
-    inflight = []
-    for f in sorted(RESULTS.glob("inflight_*_summary.csv")):
-        name = f.stem.removeprefix("inflight_").removesuffix("_summary")
-        d = pd.read_csv(f)
-        inflight += [{"case": f"{name}/{r.metric}", "method": r.estimator, "value": r.mae}
-                     for r in d.itertuples()]
-    return (_aggregate(pd.DataFrame(rows), "method", True),
-            _aggregate(pd.DataFrame(inflight), "method", True))
+    elif task == "detection":
+        dirs = [RESULTS] + [sub["dir"] for sub in submissions()]
+        for name, exp in EXPERIMENTS.items():
+            for metric in exp.events:
+                for base in dirs:
+                    f = base / f"detection_{name}_{metric}_summary.csv"
+                    if f.exists():
+                        d = pd.read_csv(f)
+                        # A constant drift score has an undefined correlation; it carries no
+                        # information about degradation, so it counts as 0 rather than a gap.
+                        rows += [{"case": f"{name}/{metric}", "method": r.detector,
+                                  "value": 0.0 if pd.isna(r.spearman) else r.spearman}
+                                 for r in d.itertuples()]
+    return pd.DataFrame(rows).drop_duplicates(["case", "method"], keep="last")
+
+
+def estimation() -> tuple[pd.DataFrame, pd.DataFrame]:
+    return (_aggregate(case_rows("estimation"), "method", True),
+            _aggregate(case_rows("inflight"), "method", True))
 
 
 def detection() -> pd.DataFrame:
+    return _aggregate(case_rows("detection"), "method", False)
+
+
+def retrain_cases(rho: float = 1.0) -> pd.DataFrame:
     rows = []
-    for name, exp in EXPERIMENTS.items():
-        for metric, (_, alarm_delta) in exp.events.items():
-            f = RESULTS / f"detection_{name}_{metric}_summary.csv"
-            if not f.exists():
-                continue
-            d = pd.read_csv(f)
-            rows += [{"case": f"{name}/{metric}", "method": r.detector, "value": r.spearman}
-                     for r in d.itertuples()]
-    return _aggregate(pd.DataFrame(rows), "method", False)
+    for name in EXPERIMENTS:
+        f = RESULTS / f"retrain_{name}.csv"
+        if not f.exists():
+            continue
+        d = pd.read_csv(f)
+        d = d[(d["rho"] == rho) & (d["policy"] != "oracle")]
+        d = d.assign(policy=d["policy"].where(~d["policy"].str.startswith("every_"), "every_k (best k)"))
+        d = d.groupby("policy", as_index=False)["regret"].min()
+        rows += [{"case": name, "method": r.policy, "value": r.regret} for r in d.itertuples()]
+    return pd.DataFrame(rows)
 
 
 def retrain(rho: float = 1.0) -> pd.DataFrame:
@@ -103,6 +146,12 @@ def main() -> None:
     det, ret = detection(), retrain()
     for name, df in [("estimation", est), ("inflight", inflight), ("detection", det), ("retrain", ret)]:
         df.to_csv(OUT / f"{name}.csv")
+    # per-case scores, for the website's detail views
+    for task in ("estimation", "inflight", "detection"):
+        case_rows(task).to_csv(OUT / f"cases_{task}.csv", index=False)
+    retrain_cases().to_csv(OUT / "cases_retrain.csv", index=False)
+    subs = [{k: v for k, v in m.items() if k != "dir"} for m in submissions()]
+    (OUT / "submissions.json").write_text(json.dumps(subs, indent=2), encoding="utf-8")
     md = [
         "# Leaderboard",
         "",

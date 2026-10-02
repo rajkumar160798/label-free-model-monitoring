@@ -1,0 +1,73 @@
+case,method,value
+freddie_2007,alarm:cbpe:roc_auc,0.7450844588818173
+freddie_2007,alarm:domain_classifier,0.7450844588818173
+freddie_2007,alarm:latest_complete_cohort:roc_auc,0.4883828747302683
+freddie_2007,alarm:psi_max,0.7450844588818173
+freddie_2007,alarm:recent_arrivals:roc_auc,0.4227776775800445
+freddie_2007,alarm:score_ks,0.7450844588818173
+freddie_2007,always,0.7450844588818173
+freddie_2007,every_k (best k),0.4316023815674503
+freddie_2007,never,0.7450844588818173
+freddie_2016,alarm:cbpe:roc_auc,0.0908110276341194
+freddie_2016,alarm:domain_classifier,0.1735978213180127
+freddie_2016,alarm:latest_complete_cohort:roc_auc,0.182657600715014
+freddie_2016,alarm:psi_max,0.1735978213180127
+freddie_2016,alarm:recent_arrivals:roc_auc,0.1089934061344637
+freddie_2016,alarm:score_ks,0.1735978213180127
+freddie_2016,always,0.1735978213180127
+freddie_2016,every_k (best k),0.1356398610640972
+freddie_2016,never,0.1735978213180127
+acs_income_2016,alarm:cbpe:accuracy,0.1067904499755063
+acs_income_2016,alarm:domain_classifier,0.0255431993317554
+acs_income_2016,alarm:latest_complete_cohort:accuracy,0.024290136705344
+acs_income_2016,alarm:psi_max,0.1067904499755063
+acs_income_2016,alarm:recent_arrivals:accuracy,0.1067904499755063
+acs_income_2016,alarm:score_ks,0.0656975416858385
+acs_income_2016,always,0.1067904499755063
+acs_income_2016,every_k (best k),0.0109222041383829
+acs_income_2016,never,0.1067904499755063
+brfss_2014,alarm:cbpe:roc_auc,0.1363998867132636
+brfss_2014,alarm:domain_classifier,0.0549060784703367
+brfss_2014,alarm:latest_complete_cohort:roc_auc,0.0493324398697119
+brfss_2014,alarm:psi_max,0.082863187837205
+brfss_2014,alarm:recent_arrivals:roc_auc,0.069821690155825
+brfss_2014,alarm:score_ks,0.1216575497358256
+brfss_2014,always,0.1363998867132636
+brfss_2014,every_k (best k),0.0113653089305145
+brfss_2014,never,0.1363998867132636
+tlc_2019,alarm:cbpe:roc_auc,0.0197814652117074
+tlc_2019,alarm:domain_classifier,0.0239327824168782
+tlc_2019,alarm:latest_complete_cohort:roc_auc,0.0209537573432179
+tlc_2019,alarm:psi_max,0.0174763375410442
+tlc_2019,alarm:recent_arrivals:roc_auc,0.0210379281035457
+tlc_2019,alarm:score_ks,0.0291919187480438
+tlc_2019,always,0.0291919187480438
+tlc_2019,every_k (best k),0.0115411662244611
+tlc_2019,never,0.0291919187480438
+tabred_homecredit,alarm:cbpe:roc_auc,0.0701643567555572
+tabred_homecredit,alarm:domain_classifier,0.0701643567555572
+tabred_homecredit,alarm:latest_complete_cohort:roc_auc,0.0701643567555572
+tabred_homecredit,alarm:psi_max,0.0701643567555572
+tabred_homecredit,alarm:recent_arrivals:roc_auc,0.0701643567555572
+tabred_homecredit,alarm:score_ks,0.0701643567555572
+tabred_homecredit,always,0.0701643567555572
+tabred_homecredit,every_k (best k),0.0175513638507924
+tabred_homecredit,never,0.0701643567555572
+tabred_homesite,alarm:cbpe:roc_auc,0.0676850027059057
+tabred_homesite,alarm:domain_classifier,0.1315112734325483
+tabred_homesite,alarm:latest_complete_cohort:roc_auc,0.0821309352351074
+tabred_homesite,alarm:psi_max,0.1315112734325483
+tabred_homesite,alarm:recent_arrivals:roc_auc,0.1104038693431519
+tabred_homesite,alarm:score_ks,0.1315112734325483
+tabred_homesite,always,0.1315112734325483
+tabred_homesite,every_k (best k),0.0220507266708556
+tabred_homesite,never,0.1315112734325483
+tabred_ecom,alarm:cbpe:roc_auc,0.1620183302666449
+tabred_ecom,alarm:domain_classifier,0.1675880036472885
+tabred_ecom,alarm:latest_complete_cohort:roc_auc,0.0680039221580193
+tabred_ecom,alarm:psi_max,0.1675880036472885
+tabred_ecom,alarm:recent_arrivals:roc_auc,0.1556743200414594
+tabred_ecom,alarm:score_ks,0.1675880036472885
+tabred_ecom,always,0.1675880036472885
+tabred_ecom,every_k (best k),0.0865790030701409
+tabred_ecom,never,0.0

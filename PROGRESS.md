@@ -202,9 +202,15 @@ Before submission:
 - `pytest` skips 6 slow tests by default (`-m slow` runs them). CI: `.github/workflows/tests.yml`.
 - Publishing: `.github/workflows/publish.yml` publishes on a GitHub release via PyPI trusted publishing (no token); the trusted publisher is configured on PyPI. **v0.1.0 published 2026-10-02**, verified with `pip install lfmm` in a fresh environment. To release a new version: bump `version` in pyproject.toml, add a CHANGELOG entry, push, create a GitHub release `vX.Y.Z`.
 
+## Leaderboard website (2026-10-02)
+
+- Site: https://rajkumar160798.github.io/label-free-model-monitoring/ , built by `scripts/build_site.py` into `_site/` (git-ignored) and deployed by `.github/workflows/pages.yml` on every push to master. Requires Settings -> Pages -> Source: GitHub Actions.
+- Submissions: `scripts/evaluate_submission.py file.py:Class` scores an estimator or detector on every experiment with available data (same deployment/seed as the baselines) into `results/submissions/<name>/` with `meta.json`; `build_leaderboard.py` merges them. Example: `submissions/example_mean_score.py`. Process: CONTRIBUTING.md, issue form, PR template.
+- Ranking: methods covering every case rank before partial ones; a constant detector score (undefined Spearman) counts as 0.
+
 ## Next steps
 
-1. Release: ~~PyPI~~ (v0.1.0 live since 2026-10-02: https://pypi.org/project/lfmm/), leaderboard site from `leaderboard/`, arXiv upload bundle (endorsement requested from Praveen Kumar Myakala).
+1. Release: ~~PyPI~~ (v0.1.0 live since 2026-10-02: https://pypi.org/project/lfmm/), ~~leaderboard site~~, arXiv upload bundle (endorsement requested from Praveen Kumar Myakala).
 2. Detection and retraining over several seeds (estimation already has 5).
 3. Calibrated alarm thresholds (held-out reference periods) instead of rules of thumb.
 4. Regression support, to add the five TabReD regression datasets.

@@ -12,3 +12,5 @@ wheels/
 # Tooling
 .pytest_cache/
 .vscode/
+
+_site/

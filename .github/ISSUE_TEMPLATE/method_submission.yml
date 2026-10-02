@@ -1,0 +1,61 @@
+name: Method submission
+description: Propose a performance estimator or degradation detector for the leaderboard
+title: "[submission] <method name>"
+labels: [submission]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for submitting! The easiest path is a pull request with your method file and the output of
+        `scripts/evaluate_submission.py` (see CONTRIBUTING.md). If you cannot run the benchmark yourself,
+        fill in this form and the maintainers will run it.
+  - type: input
+    id: name
+    attributes:
+      label: Method name
+      description: Short, unique, lowercase (used as `name` in your class)
+      placeholder: my_method
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type
+      options:
+        - Estimator (estimates the model's metric)
+        - Detector (raises degradation alarms)
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: One or two sentences on what the method does
+    validations:
+      required: true
+  - type: input
+    id: code
+    attributes:
+      label: Code
+      description: Link to a file or repository with a class subclassing `lfmm.estimators.Estimator` or `lfmm.detectors.Detector`
+    validations:
+      required: true
+  - type: input
+    id: paper
+    attributes:
+      label: Paper (optional)
+  - type: input
+    id: author
+    attributes:
+      label: Author(s) as they should appear on the leaderboard
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: The method uses only the scores and the `History` it is given (no outside data, no peeking at future labels).
+          required: true
+        - label: I agree to the code being included in the repository under the MIT license.
+          required: true
