@@ -264,7 +264,7 @@ def index(subs: dict) -> str:
 <strong>real, naturally drifting data</strong>, where each label becomes visible only when it would have arrived in
 practice. A loan default, for example, is known up to two years after the loan is made.</p>
 <div class="cta"><a class="btn primary" href="submit.html">Submit a method</a>
-<a class="btn" href="{REPO}/blob/master/paper/main.pdf">Read the paper</a><a class="btn" href="https://pypi.org/project/lfmm/">pip install lfmm</a>
+<a class="btn" href="{REPO}/blob/master/paper/label%20free%20model%20monitoring.pdf">Read the paper</a><a class="btn" href="https://pypi.org/project/lfmm/">pip install lfmm</a>
 <a class="btn" href="{REPO}">GitHub</a></div>
 <div class="findings" id="findings">
 <div class="card"><div class="k">100%</div><div class="t">of periods flagged by every input-drift test (PSI, KS, MMD, domain classifier) in the median experiment: on real data, the inputs always change.</div></div>
