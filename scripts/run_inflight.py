@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from lfmm.estimators import CBPE, DelayAdjustedCBPE, LabelsToDate, LatestCompleteCohort, ReferencePerformance
+from lfmm.estimators import (CBPE, DelayAdjustedCBPE, HazardAdjustedCBPE, LabelsToDate,
+                             LatestCompleteCohort, ReferencePerformance)
 from lfmm.experiments import EXPERIMENTS
 from lfmm.harness import run_inflight
 
@@ -31,7 +32,7 @@ def main(names: list[str]) -> None:
         stream = exp.load()
         res = run_inflight(stream, metrics=("prevalence", "roc_auc"), book_months=24,
                            estimators=[ReferencePerformance(), LabelsToDate(), LatestCompleteCohort(freq="M"),
-                                       CBPE(), DelayAdjustedCBPE()],
+                                       CBPE(), DelayAdjustedCBPE(), HazardAdjustedCBPE()],
                            **exp.deploy_kwargs())
         print(f"\n=== {name}: in-flight book (last 24 months of loans) ===")
         summary = res.summary()

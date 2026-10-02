@@ -1,0 +1,332 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{microtype}
+
+% Placeholder for numbers still to be filled in.
+\newcommand{\TBD}[1]{\textcolor{red}{[TBD: #1]}}
+
+\title{Monitoring Models Before the Labels Arrive:\\
+A Benchmark for Performance Estimation, Drift Detection and Retraining\\
+under Natural Drift and Label Delay}
+\author{Raj KumarMyakala}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Deployed models are monitored long before their true labels arrive: a mortgage default is
+known up to two years after the loan is made. Yet drift detectors and label-free performance
+estimators are usually evaluated on artificially injected drift with labels available
+immediately. We present an open benchmark that replays five real, timestamped data sources
+(Freddie Mac mortgages, US Census ACS, CDC BRFSS, NYC taxi trips and TabReD) as streams in which a
+monitor sees each label only when it would have arrived in practice, including the
+\emph{natural} label delay of mortgage defaults. The benchmark scores four tasks on eight
+experiments: estimating the performance of a new batch, estimating the performance of the
+partly labeled ``in-flight'' book, detecting degradation, and deciding when to retrain,
+the last scored as regret against a hindsight-optimal schedule. Three findings stand out.
+(1) Input-drift tests (PSI, Kolmogorov--Smirnov, MMD, domain classifiers) alarm in every
+period of the median experiment: on real data the inputs always change. (2) Label-free
+estimators miss shocks that change outcomes but not inputs (the 2007--08 mortgage
+crisis), while label-based monitoring sees them about two years late. (3) A fixed retraining
+calendar beats monitor-triggered retraining in most experiments. We also propose
+delay-adjusted CBPE, which uses early-arriving labels without being biased by them. It gives
+the best degradation alarm overall (median rank correlation with true degradation 0.58,
+precision 0.84). Its chain-ladder form fails, like actuarial chain-ladder methods, under
+calendar-time shocks such as COVID forbearance; an age--period--cohort hazard variant fixes
+this and gives the lowest in-flight error on Freddie Mac in three of four cases over five
+seeds, e.g.\ 31\% lower default-rate error than the best label-based baseline across the
+2007--2024 period. Code, data loaders and a leaderboard are released under the MIT license.
+\end{abstract}
+
+\section{Introduction}
+
+Teams that run models in production ask two questions continually: \emph{is the model still
+working}, and \emph{should we retrain it}? Answering with labels is often impossible in time.
+A credit model's outcome (default within 24 months) is fully known only two years after each
+decision; insurance conversions, medical outcomes and fraud chargebacks arrive weeks to months
+late. Monitoring therefore relies on proxies: tests that the input distribution has shifted
+\citep{rabanser2019failing,gretton2012kernel}, estimators that predict accuracy from the model's
+own confidence \citep{garg2022atc,guillory2021doc,nannyml}, and streaming detectors on whatever
+labels have arrived \citep{bifet2007adwin,gama2014survey}.
+
+These methods are rarely evaluated under the conditions they are meant for. Benchmarks
+typically inject synthetic drift into shuffled data and reveal each label immediately
+\citep{cerqueira2026drift}; distribution-shift benchmarks with natural shift
+\citep{koh2021wilds,yao2022wildtime} evaluate models, not monitors, and ignore when labels
+arrive. Delayed labels have been studied for stream classifiers \citep{grzenda2020delayed}, but
+not as the central obstacle to monitoring.
+
+We build a benchmark around that obstacle. Our contributions:
+\begin{enumerate}
+  \item \textbf{Streams with label arrival times.} Five public sources replayed in time
+  order; each row carries the time it is scored and the time its label becomes known. For
+  Freddie Mac mortgages the arrival is natural: a default is known in the month it happens,
+  a repayment only when the 24-month window closes (Section~\ref{sec:benchmark}).
+  \item \textbf{Four tasks with leakage-free evaluation}: next-batch estimation, in-flight
+  book estimation, degradation detection, and retraining decisions scored against a
+  hindsight-optimal schedule computed by dynamic programming (Section~\ref{sec:tasks}).
+  \item \textbf{Delay-adjusted CBPE}, a chain-ladder \citep{mack1993chainladder} correction that
+  lets confidence-based estimation use early, biased labels, and an age--period--cohort hazard
+  variant robust to calendar-time shocks (Section~\ref{sec:method}).
+  \item \textbf{An empirical study} of 11 detectors, 8 estimators and 9 retraining policies on
+  8 experiments (Section~\ref{sec:results}), with a public leaderboard.
+\end{enumerate}
+
+\section{Related work}
+
+\paragraph{Drift detection.} Two-sample tests on inputs or model outputs
+\citep{rabanser2019failing}, kernel tests \citep{gretton2012kernel}, domain classifiers, and
+the population stability index used in credit risk flag that \emph{data} changed. Streaming
+detectors such as ADWIN \citep{bifet2007adwin} monitor error rates and therefore need labels;
+see \citet{gama2014survey} for a survey.
+
+\paragraph{Label-free performance estimation.} ATC \citep{garg2022atc} and DoC
+\citep{guillory2021doc} predict accuracy from confidence; CBPE \citep{nannyml} computes expected
+confusion matrices from calibrated probabilities. All are exact under pure covariate shift with
+calibration and fail under concept shift; label-shift estimators \citep{lipton2018bbse} assume
+$P(x \mid y)$ is fixed. None uses the labels that do arrive early.
+
+\paragraph{Benchmarks with natural shift.} Folktables \citep{ding2021folktables} exposes
+year-to-year census shift; TabReD \citep{rubachev2024tabred} supplies industrial tabular data with
+time-based splits; WILDS and Wild-Time \citep{koh2021wilds,yao2022wildtime} cover natural shift
+for model robustness. Our benchmark reuses Folktables and TabReD data but evaluates monitors and
+adds label arrival.
+
+\paragraph{Delayed outcomes in actuarial science.} Insurers estimate claims incurred but not
+yet reported with chain-ladder development patterns \citep{mack1993chainladder}; competing-risk
+models \citep{fine1999competing} handle outcomes that can be pre-empted (a loan that repays cannot
+default). Our method borrows both ideas.
+
+\section{Benchmark}\label{sec:benchmark}
+
+\paragraph{Stream format.} A stream is a table of prediction events. Row $i$ has features
+$x_i$, an event time $t_i$ when the model scores it, an eventual label $y_i$ (possibly never
+resolved) and a label time $\tau_i \ge t_i$ when $y_i$ becomes known. At any decision time
+$s$, a monitor may use $y_i$ only if $\tau_i \le s$.
+
+\paragraph{Data.} Table~\ref{tab:streams} lists the streams. Freddie Mac
+\citep{freddiemac_sflld}: 1.36M loans originated 1999--2026 (the public 50k-per-year sample);
+label: 90+ days delinquent or a credit-loss termination within 24 months of first payment; the
+label time is the month of the event, or the month the loan reaches age 24 or prepays. Age is
+counted in calendar months: the reported loan age is reset when a loan is modified, which would
+otherwise let defaults years later count as early ones. ACS
+\citep{ding2021folktables}: income above \$50k, 2014--2024 (2020 has no standard release),
+relationship and state codes harmonized across years. BRFSS \citep{cdc_brfss}: diagnosed
+diabetes, 2011--2024, ordered by interview month, 28 variables harmonized across renamings.
+NYC taxi \citep{nyc_tlc}: card trips 2019--2021, label: tip $\ge$ 25\% of fare. TabReD
+\citep{rubachev2024tabred}: the three binary tasks. Streams other than Freddie Mac receive a
+simulated constant delay (Table~\ref{tab:streams}).
+
+\begin{table}[t]
+\centering
+\caption{Experiments. Delay: natural, or simulated constant delay.}
+\label{tab:streams}
+\small
+\begin{tabular}{llrlll}
+\toprule
+Experiment & Target & Rows & Delay & Trained on & Monitored \\
+\midrule
+freddie\_2007 & default $\le$24m & 1.36M & natural & 1999--2003 & 2007Q1--2024Q1 (q) \\
+freddie\_2016 & default $\le$24m & 1.36M & natural & 2010--2012 & 2016Q1--2024Q1 (q) \\
+acs\_income\_2016 & income $>$\$50k & 1.0M & 365 d & 2014 & 2016--2024 (y) \\
+brfss\_2014 & diabetes & 1.68M & 180 d & 2011--mid 2013 & 2014--2025 (q) \\
+tlc\_2019 & tip $\ge$25\% & 1.8M & 30 d & Feb--May 2019 & Jul 2019--Dec 2021 (m) \\
+tabred\_homecredit & default & 382k & 90 d & Jan--May 2019 & 14 months (m) \\
+tabred\_homesite & conversion & 261k & 30 d & Jan--Aug 2013 & 20 months (m) \\
+tabred\_ecom & repeat purchase & 160k & 14 d & Mar 1--17 2013 & 5 weeks (w) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Training without label leakage.} At the training date, a model may only learn from
+cohorts whose labels have (at least 95\%) arrived. Using partly labeled cohorts is a common
+silent error: early-arriving labels (defaults) are over-represented. The last 12 months of
+trainable cohorts form the reference window on which monitors are calibrated. The model is a
+gradient-boosted tree ensemble; it is then frozen.
+
+\section{Tasks}\label{sec:tasks}
+
+\paragraph{T1: next-batch estimation.} For each period, estimate the frozen model's metric
+(AUC, positive rate, and accuracy where classes are balanced) on the batch scored in that
+period, using its scores and the labels arrived by the period's end. Score: mean absolute error
+(MAE) over periods, with 95\% moving-block bootstrap intervals over periods.
+
+\paragraph{T2: in-flight book estimation.} For long-horizon labels, a new batch's outcome
+depends on events that have not happened yet: Freddie Mac loans made in 2019Q1 defaulted at
+4.4\% because of a pandemic a year later. The question a lender can answer is the state of its
+\emph{book}: all loans scored in the last 24 months, part of which are already labeled.
+Same score as T1.
+
+\paragraph{T3: degradation detection.} A period is \emph{degraded} if its true metric is
+worse than the reference by more than $\Delta$ (any change, for positive rate). Each detector
+returns a drift score and an alarm. Scores: Spearman correlation of the drift score with the
+true degradation; AUROC for several $\Delta$; precision and recall of the alarms.
+
+\paragraph{T4: retrain or not.} After each period a policy may retrain on the labels arrived
+so far. We precompute one candidate model per decision point and its loss (log loss) on every
+later period, so any policy is evaluated by lookup. Cost $=$ total loss $+\ \lambda \times$
+retrains. We report regret against the hindsight-optimal schedule, found by dynamic
+programming over which model serves each period, for $\lambda = \rho \cdot g$, where $g$ is the
+average gain of one retrain under ``always retrain'' and $\rho \in \{0, 0.25, 1, 4\}$.
+
+\section{Delay-adjusted CBPE}\label{sec:method}
+
+CBPE treats calibrated scores $c_i$ as the probability each row is positive. Under concept
+shift the calibration breaks; the labels that would reveal this arrive late, and the first to
+arrive are biased: defaults arrive within months, repayments only after 24.
+
+\paragraph{Arrival curves.} From mature rows (older than the longest observed delay) we
+estimate $F(a)$, the probability that a positive's label has arrived by age $a$, and $G(a)$
+for negatives.
+
+\paragraph{Offset.} We model the true probability as $p_i = \sigma(\operatorname{logit} c_i +
+\delta)$ and fit $\delta$ by maximum likelihood on the last 12 months of rows. Each row
+contributes $p_i$ if its label arrived positive, $1-p_i$ if negative, and
+\[ 1 - p_i F(a_i) - (1-p_i)\, G(a_i) \]
+if still pending at age $a_i$. Early defaults therefore move $\delta$ at once without being
+over-counted: a pending row is evidence of a negative only to the extent that a positive would
+have arrived by now. With constant delay the method reduces to recalibrating on the most recent
+complete labels.
+
+\paragraph{Estimates.} For a new batch, the metric is computed as in CBPE from $p_i$ (expected
+AUC from all positive--negative pairs; expected accuracy and positive rate in closed form). For
+the in-flight book, arrived labels count as observed and pending rows use the posterior
+$P(y_i = 1 \mid \text{pending}) = p_i(1-F(a_i)) / (1 - p_i F(a_i) - (1-p_i) G(a_i))$.
+
+\paragraph{Calendar-time shocks.} The development pattern $F$ is assumed stable. A shock that
+hits rows of every age at once violates it: during COVID forbearance, loans of all ages became
+90 days delinquent within months, which the method reads as the early edge of a much larger
+wave and projects onto new loans. Actuarial chain-ladder methods share this weakness with
+``calendar-year effects''.
+
+\paragraph{Hazard variant.} We recast the method as an age--period--cohort model in discrete
+time. On a monthly age grid, row $i$'s cumulative incidence without shocks is $p_i F(k)$, which
+defines monthly hazard increments $L_i(k) = \log(1 - p_i F(k-1)) - \log(1 - p_i F(k))$.
+\emph{Age} is fixed by $F$. \emph{Cohort}: $p_i = \sigma(\operatorname{logit} c_i + \delta_{g(i)})$
+with one shift for the newest 12 months of rows and one for the 12 before. \emph{Period}: in
+each of the last 24 calendar months $t$, every row alive gets the same extra hazard
+$\lambda_t \ge 0$. With $S_i(k) = \exp(-\sum_{j \le k} [L_i(j) + \lambda_{t_i(j)}])$, a positive
+arriving in month $k^*$ contributes $S_i(k^*-1) - S_i(k^*)$, a known negative $S_i(H)$, and a
+pending row $S_i(a_i) - S_i(H)\,G(a_i)$. Older rows anchor $\lambda$: a calendar burst raises
+their arrivals too, a new-cohort shift does not. This is what separates the two. Two design
+choices matter. First, $\lambda_t \ge 0$: recent rows have no resolved negatives yet, so with
+signed period effects ``nearly every row will be positive, just slowly'' fits as well as the
+truth. Second, shocks are additive rather than proportional to each row's hazard, since
+forbearance-type shocks hit safe and risky rows alike. New rows are projected with the newest
+cohort's shift only; bursts are counted but not extrapolated. We fit by L-BFGS-B with analytic
+gradients.
+
+\section{Results}\label{sec:results}
+
+\paragraph{Detection (T3).} Table~\ref{tab:detection} summarizes 16 cases (8 experiments $\times$
+2 event types). Every input-drift test alarms in every period of the median case: lender
+churn, interest-rate levels, a discontinued channel code and a field introduced in 2017 all
+shift Freddie Mac's inputs without necessarily hurting the model. Their scores still rank
+severity moderately (median $\rho$ 0.37--0.49), but their thresholds are unusable. The
+delay-adjusted alarm both ranks degradation best (median $\rho$ 0.58) and alarms selectively
+(32\% of periods, precision 0.84). ADWIN on arriving errors, the classic streaming setup, ranks
+last: under delay it sees too little, too late.
+
+\begin{table}[t]
+\centering
+\caption{Degradation detection: medians over 16 cases.}
+\label{tab:detection}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Detector & Spearman $\rho$ & Alarm rate & Precision & Recall \\
+\midrule
+Delay-adjusted CBPE alarm (ours) & \textbf{0.58} & 0.32 & \textbf{0.84} & 0.52 \\
+CBPE alarm & 0.50 & 0.11 & 0.82 & 0.11 \\
+ADWIN on scores & 0.50 & 0.10 & 0.67 & 0.13 \\
+KS on scores & 0.49 & 1.00 & 0.48 & 1.00 \\
+PSI & 0.40 & 1.00 & 0.44 & 1.00 \\
+MMD & 0.38 & 1.00 & 0.52 & 1.00 \\
+Univariate KS / $\chi^2$ & 0.37 & 1.00 & 0.48 & 1.00 \\
+Domain classifier & 0.37 & 1.00 & 0.52 & 1.00 \\
+Latest complete cohort alarm & 0.31 & 0.39 & 0.71 & 0.71 \\
+Recent arrivals alarm & 0.21 & 0.24 & 0.63 & 0.40 \\
+ADWIN on arrived errors & 0.17 & 0.13 & 0.83 & 0.19 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Estimation (T1, T2).} Tables~\ref{tab:estimation} and~\ref{tab:inflight} report MAE over
+five seeds. Seed-to-seed variation is small relative to the gaps between methods.
+
+\emph{Next batch.} No method dominates. Label-free and delay-adjusted estimators are most
+accurate when shift is mostly in the inputs (TabReD homesite and homecredit, BRFSS). With short
+delays and a drifting label, simply using the latest complete labels wins (ACS income under wage
+inflation, NYC taxi tips, TabReD ecom). On short-horizon streams the hazard variant's extra
+parameters are poorly anchored and cost accuracy (NYC taxi positive rate: 0.030 vs.\ 0.012 for the
+chain-ladder form), so it should be preferred only where labels arrive over a long horizon. On
+Freddie Mac the task is close to unanswerable: loans made in 2019Q1 defaulted at 4.4\% because of
+a pandemic a year later.
+
+\emph{In-flight book.} Here early labels pay off (Table~\ref{tab:inflight}). The hazard variant
+has the lowest error in three of four cases. On freddie\_2007 its default-rate error is 0.0060
+against 0.0087 for the best label-based baseline, and its AUC error 0.0180 against 0.0215;
+block-bootstrap intervals of the paired differences exclude zero (default rate: $-0.0034$
+[$-0.0076$, $-0.0004$] vs.\ waiting for complete cohorts; AUC: $-0.0058$ [$-0.0126$, $-0.0001$]
+vs.\ labels to date). The exception is freddie\_2016 AUC, where labels to date is better (0.0263
+vs.\ 0.0287; interval includes zero).
+
+Figure~\ref{fig:freddie} shows the mechanism. CBPE stays near the reference default rate through
+the 2007--08 crisis (loans made in 2008Q1: true 6.6\%, CBPE 1.0\%). Waiting for complete cohorts
+sees the crisis about two years late and then reports it after it has passed (4.7\% for 2010Q1
+loans against a true 0.6\%). On the in-flight book both delay-adjusted estimators react within
+quarters. Under COVID, the chain-ladder form reads forbearance as the start of a much larger wave
+(peak in-flight estimate 8.3\% against a true peak of 4.3\%); the hazard variant attributes it to
+calendar months and peaks at 4.3\%.
+
+\input{tables/estimation.tex}
+\input{tables/inflight.tex}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../figures/freddie_2007_default_rate.pdf}
+\caption{Freddie Mac, model built January 2007. Top: eventual default rate of each quarter's
+new loans. Bottom: default rate of the in-flight book (loans from the last 24 months).}
+\label{fig:freddie}
+\end{figure}
+
+\paragraph{Synthetic checks.} Two controlled streams isolate the two kinds of shock: a lasting
+shift (the outcome rate of new cohorts jumps) and a calendar burst (for four months every active
+loan has an extra 3\% monthly default hazard, new cohorts unaffected). The chain-ladder form tracks
+the lasting shift best (in-flight MAE 0.007 vs.\ 0.050 for complete cohorts) but its error grows
+more than tenfold under the burst (0.094). The hazard variant gives up a little on the lasting
+shift (0.010) and cuts the burst error to 0.030, the best of all methods.
+
+\paragraph{Retraining (T4).} At moderate retraining cost ($\rho=1$) a fixed calendar is the best
+policy in 5 of 8 experiments (with the period chosen in hindsight, which flatters it). Monitoring
+helps on Freddie Mac: retraining on alarms from recently arrived labels wins on freddie\_2007, and
+on CBPE alarms on freddie\_2016. Retraining on input-drift alarms is equivalent to always
+retraining, since those tests always fire: cheapest when retraining is free, among the worst once
+it costs anything. On tabred\_ecom retraining never pays: newer models train on too little data.
+
+\section{Limitations}
+
+Simulated delays on six of eight experiments are constant; only Freddie Mac has natural arrival.
+Estimation results cover five seeds (model randomness and, for sampled streams, the sample);
+detection and retraining results are single runs with period-level summaries. The
+fixed-calendar policy's period is chosen in hindsight. Regression tasks (five TabReD datasets)
+are not yet supported. Freddie Mac and TabReD data cannot be redistributed; the benchmark ships
+loaders and checksums, not data.
+
+\section{Conclusion}
+
+Monitoring benchmarks should model when labels arrive. Doing so shows that input-drift alarms
+are uninformative on real data, that label-free and label-based estimators fail in opposite
+directions, and that early-arriving labels, once their bias is corrected, close much of the gap.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

@@ -160,11 +160,45 @@ Figures: `figures/freddie_2007_default_rate.png` (next batch and in-flight book)
 - On freddie_2016 and tabred_ecom, retraining every period is *worse* than never: newer models train on less or less relevant data.
 - BRFSS retraining is slow (~44 models plus alarm policies, over an hour under load); `scripts/run_retrain.py brfss_2014 --fast` skips the domain-classifier policy if needed.
 
+## Corrections and the hazard variant (2026-10-02)
+
+**Freddie Mac label bug, fixed.** The "default within 24 months" window used Freddie Mac's reported LOAN AGE, which is reset when a loan is modified. 17.7% of positives were defaults that happened years after the window. The window is now counted in calendar months from the first payment. Positives: 22,812 → 18,777. All Freddie Mac numbers in the sections above (first results, detection, da_cbpe intervals, retraining) predate the fix; the reruns replace them in `results/`, `leaderboard/` and the paper.
+
+**Hazard variant `da_cbpe_hz` (fixes the calendar-shock weakness).** An age-period-cohort model in discrete time (see `HazardAdjustedCBPE` docstring):
+- age from the arrival curve F;
+- two cohort shifts: the newest 12 months (projected to new loans) and the 12 before;
+- an additive calendar-month hazard λ_t ≥ 0 for the last 24 months.
+
+Analytic gradients; warm starts; fits shared between tasks. Getting it right took several fixes, each recorded here because they are easy to get wrong:
+1. Shocks must be able to *add* defaults, not just change their timing (timing-only κ failed).
+2. λ ≥ 0: recent rows have no resolved negatives, so signed shocks let "everyone defaults, slowly" fit as well as the truth.
+3. Additive, not proportional, shocks: forbearance hits safe and risky loans alike.
+4. A 24-month window with two cohort shifts: older loans anchor λ, which is what separates a burst from a lasting shift.
+5. Credit survival up to the exact current age (monthly flooring biased δ up by ~0.15).
+6. The grid is sized from the 99.5th percentile of delays; the arrival curve is blended with 1% uniform (empty months gave −∞ log-likelihood and a broken line search); unresolvable pending rows are excluded.
+
+On synthetic data (MAE of the positive rate):
+
+| Scenario | CBPE | da_cbpe | da_cbpe_hz | best label-based |
+|---|---|---|---|---|
+| calendar burst, next batch | 0.030 | 0.133 | 0.040 | 0.082 |
+| calendar burst, in-flight | 0.055 | 0.094 | **0.030** | 0.047 |
+| lasting shift, next batch | 0.125 | **0.048** | 0.061 | 0.110 |
+| lasting shift, in-flight | 0.065 | **0.007** | 0.010 | 0.050 |
+
+## Paper (2026-10-02)
+
+Draft in `paper/main.tex` (+ `references.bib`, generated `tables/`), compiled to `paper/main.pdf` (9 pages). Build: Tectonic or any LaTeX (`latexmk -pdf main.tex` in `paper/`); tables come from `uv run python scripts/make_tables.py`, figures from `scripts/make_figures.py`. All numbers are from the corrected Freddie Mac labels; estimation tables are 5 seeds.
+
+Before submission:
+- verify the `TODO-verify` bibliography entries (the June 2026 drift benchmark, NannyML citation, TabReD venue, Grzenda et al. details);
+- author line reads "Raj KumarMyakala" (check spacing); add affiliation;
+- pick a venue and apply its template and page limit.
+
 ## Next steps
 
-1. **Hazard-based da_cbpe** (age-period discrete-time model) to fix calendar-time shocks; the strict xfail test will flag success.
-2. Calibrated alarm thresholds (from held-out reference periods) instead of rules of thumb.
-3. Repeated model seeds (the intervals so far cover period-to-period variation only).
+1. Release: push to GitHub (MIT license added), publish to PyPI, leaderboard site from `leaderboard/`.
+2. Detection and retraining over several seeds (estimation already has 5).
+3. Calibrated alarm thresholds (held-out reference periods) instead of rules of thumb.
 4. Regression support, to add the five TabReD regression datasets.
-5. Speed: cache model banks to disk; the domain-classifier and MMD detectors dominate detection time.
-6. Release: license choice, PyPI package, leaderboard site (from `leaderboard/`), workshop paper draft.
+5. Faster tests: the hazard tests take ~25 min under load; shrink their synthetic streams.

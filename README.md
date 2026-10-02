@@ -2,7 +2,7 @@
 
 A benchmark and toolkit for drift detection, label-free performance estimation and retraining decisions on naturally drifting, timestamped data with realistic label delay.
 
-Work in progress. Data plan and download status: [DATA.md](DATA.md). Project status, design decisions and first results: [PROGRESS.md](PROGRESS.md).
+Work in progress. Paper draft: [paper/main.pdf](paper/main.pdf). Data plan and download status: [DATA.md](DATA.md). Project status, design decisions and first results: [PROGRESS.md](PROGRESS.md).
 
 ## Setup
 
@@ -32,7 +32,10 @@ uv run python scripts/run_estimation.py     # performance-estimation experiments
 uv run python scripts/run_detection.py      # degradation-detection experiments -> results/detection_*
 uv run python scripts/run_inflight.py       # in-flight book estimation (natural label delay) -> results/inflight_*
 uv run python scripts/run_retrain.py        # retrain-or-not task (slow: one model per period) -> results/retrain_*
+uv run python scripts/run_seeds.py          # estimation over 5 seeds -> results/seeds_*
 uv run python scripts/make_figures.py       # figures/ from results/
+uv run python scripts/make_tables.py        # paper/tables/ from seed results
+uv run python scripts/build_leaderboard.py  # leaderboard/ from results/
 uv run pytest -q
 ```
 
@@ -72,3 +75,7 @@ print(result.bootstrap_mae("prevalence"))
 ```
 
 Detectors follow the same pattern (`lfmm.detectors.Detector`: `fit` on the reference window, `score` returns `(drift_score, alarm)`), as do retraining policies (`lfmm.retrain.Policy`).
+
+## License
+
+MIT; see [LICENSE](LICENSE). Data is not redistributed: Freddie Mac and TabReD have their own terms; use the loaders with your own downloads.

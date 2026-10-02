@@ -25,7 +25,8 @@ SERIES = {
     "truth": dict(label="Truth (hidden labels)", color=INK, lw=2.4, ls="-"),
     "cbpe": dict(label="CBPE (label-free)", color="#2a78d6", lw=2, ls=(0, (6, 2))),
     "latest_complete_cohort": dict(label="Latest complete cohort", color="#eb6834", lw=2, ls=(0, (2, 2))),
-    "da_cbpe": dict(label="Delay-adjusted CBPE (ours)", color="#1baf7a", lw=2, ls="-"),
+    "da_cbpe": dict(label="Delay-adjusted CBPE (ours)", color="#1baf7a", lw=2, ls=(0, (5, 1.5, 1.5, 1.5))),
+    "da_cbpe_hz": dict(label="Delay-adjusted CBPE, hazard (ours)", color="#eda100", lw=2.2, ls="-"),
 }
 EVENTS = [("2007Q3", "housing crisis"), ("2020Q1", "COVID")]
 
@@ -77,7 +78,7 @@ def main():
     timeline(axes[1], book, "prevalence",
              "In-flight book: default rate of all loans from the last 24 months", pct=True)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=4, frameon=False, fontsize=9,
+    fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, fontsize=9,
                labelcolor=INK_2, bbox_to_anchor=(0.5, 1.0))
     fig.suptitle("Freddie Mac, model built Jan 2007: estimated vs true default rate",
                  x=0.01, ha="left", y=1.045, color=INK, fontsize=12.5, fontweight="bold")
@@ -88,8 +89,8 @@ def main():
 
     fig, ax = plt.subplots(figsize=(9, 3.8))
     timeline(ax, batch, "roc_auc", "New batch: AUC of the frozen model", pct=False)
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.08), frameon=False, fontsize=9,
-              labelcolor=INK_2, ncol=4)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.08), frameon=False, fontsize=9, ncol=3,
+              labelcolor=INK_2)
     fig.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(FIGURES / f"freddie_2007_auc.{ext}", dpi=200, bbox_inches="tight")

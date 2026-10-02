@@ -336,6 +336,228 @@ class DelayAdjustedCBPE(CBPE):
         return self._metric(metric, proba, c)
 
 
+# Fitted hazard parameters by (decision time, history, reference): the estimation
+# and in-flight tasks fit the same model at the same time; fit it once.
+_HAZARD_FITS: dict = {}
+
+
+class HazardAdjustedCBPE(DelayAdjustedCBPE):
+    """Delay-adjusted CBPE as a discrete-time hazard model with calendar-month shocks.
+
+    Fixes da_cbpe's weakness with shocks that hit every row at once (e.g. COVID
+    forbearance), which it reads as a lasting shift. An age-period-cohort model on
+    a monthly grid, over rows from the last ``window_months``:
+
+    - age: positives' arrival curve F (from mature rows) gives each row a monthly
+      hazard increment L(k) = log(1 - p F(k-1)) - log(1 - p F(k)), where
+      p = sigmoid(logit(c) + delta) is its eventual probability;
+    - cohort: delta_new for rows from the newest ``new_cohort_months``, delta_old
+      for older ones. Only delta_new is projected to new rows;
+    - period: in each of the last ``calendar_months`` calendar months, every row
+      alive in that month gets the same extra hazard lambda_t >= 0 (a burst adds
+      defaults, the same for safe and risky rows, and never removes them).
+
+    Likelihood (G = negatives' arrival curve, S = exp(-cumulative hazard)):
+      positive arriving in month k*:  S(k*-1) - S(k*)
+      known negative:                 S(H)
+      pending at age a:               S(a) - S(H) G(age)
+    Older rows anchor lambda (a burst hits them too; a new-cohort shift does not),
+    which is what separates a burst from a lasting shift. New rows get
+    p = sigmoid(logit(c) + delta_new); pending in-flight rows use the posterior
+    (S(a) - S(H)) / (S(a) - S(H) G) with the fitted bursts. Analytic gradients.
+    """
+    name = "da_cbpe_hz"
+    MONTH_DAYS = 30.44
+
+    def __init__(self, calendar_months: int = 24, ridge: float = 1.0, window_months: int = 24,
+                 new_cohort_months: int = 12, max_rows: int = 20_000, **kwargs):
+        super().__init__(window_months=window_months, max_rows=max_rows, **kwargs)
+        self.K = calendar_months
+        self.ridge = ridge
+        self.new_cohort = np.timedelta64(int(new_cohort_months * 30.44), "D")
+        self.last_kappa = np.zeros(calendar_months)
+        self.last_delta_old = 0.0
+
+    # -- grid helpers ------------------------------------------------------------
+
+    def _increments(self, p: np.ndarray) -> np.ndarray:
+        """Monthly hazard increments L(k) = log(1 - p F(k-1)) - log(1 - p F(k)), n x H."""
+        Fk = np.clip(p[:, None] * self._Fm[None, :], 0, 1 - 1e-9)
+        return np.log1p(-Fk[:, :-1]) - np.log1p(-Fk[:, 1:])
+
+    def _grid(self, history: History, idx: np.ndarray):
+        """Per row: calendar slot of each age month (n x H; -1 = no kappa), completed
+        age months a, fraction of the current month already lived, label arrival month k*."""
+        H = self._H
+        age_days = (history.now - history.event_time[idx]) / np.timedelta64(1, "D")
+        a = np.clip(np.floor(age_days / self.MONTH_DAYS), 0, H).astype(int)
+        frac = np.where(a < H, age_days / self.MONTH_DAYS - a, 0.0)
+        # months ago (from now) at which age month k (1..H) ended
+        k = np.arange(1, H + 1)
+        months_ago = np.floor((age_days[:, None] - k[None, :] * self.MONTH_DAYS) / self.MONTH_DAYS)
+        slot = np.where((months_ago >= 0) & (months_ago < self.K), self.K - 1 - months_ago, -1).astype(int)
+        current = k[None, :] == a[:, None] + 1                         # the month being lived now
+        slot = np.where(current & (self.K > 0), self.K - 1, slot)
+        slot = np.where(k[None, :] <= a[:, None] + 1, slot, -1)       # future months: no kappa
+        lab_days = (history.label_time[idx] - history.event_time[idx]) / np.timedelta64(1, "D")
+        kstar = np.clip(np.ceil(np.nan_to_num(lab_days) / self.MONTH_DAYS), 1, H).astype(int)
+        return slot, a, frac, kstar
+
+    @staticmethod
+    def _cum_now(cum, a, frac):
+        """Cumulative hazard at each row's exact current age (linear within the month)."""
+        n = np.arange(len(a))
+        nxt = np.minimum(a + 1, cum.shape[1] - 1)
+        return cum[n, a] + frac * (cum[n, nxt] - cum[n, a])
+
+    def _cum(self, L, slot, lam):
+        shock = np.where(slot >= 0, lam[np.maximum(slot, 0)], 0.0) if len(lam) else 0.0
+        return np.concatenate([np.zeros((len(L), 1)), np.cumsum(L + shock, axis=1)], axis=1)  # n x (H+1)
+
+    # -- fitting -----------------------------------------------------------------
+
+    def _fit(self, history: History) -> None:
+        from scipy.optimize import minimize
+
+        self.last_kappa = np.zeros(self.K)
+        self._H = None
+        prep = self._prepare(history)
+        if prep is None:
+            return
+        # Grid length from the 99.5th percentile of positives' delays: a few very late
+        # arrivals (e.g. modified loans whose age was reset) would otherwise stretch the
+        # grid to years; they fall in the last month instead.
+        f_days = prep["f_delays"] / np.timedelta64(1, "D")
+        horizon_days = float(np.quantile(f_days, 0.995))
+        self._H = H = max(1, int(np.ceil(horizon_days / self.MONTH_DAYS)))
+        edges = (np.arange(H + 1) * self.MONTH_DAYS).astype("timedelta64[D]")
+        Fm = np.searchsorted(prep["f_delays"], edges, side="right") / len(prep["f_delays"])
+        Fm[-1] = 1.0
+        # Blend in 1% of a uniform arrival curve: an empirical curve can have months with
+        # no mass (e.g. defaults almost never arrive in month 1), which would give an
+        # arrival in that month probability 0 and an infinite log-likelihood.
+        self._Fm = 0.99 * Fm + 0.01 * np.arange(H + 1) / H
+
+        rows, y = prep["rows"], prep["y"]
+        z = prep["z"]
+        t = history.event_time[rows]
+        new = t > t.max() - self.new_cohort  # newest cohorts: their shift is projected forward
+        slot, a, frac, kstar = self._grid(history, rows)
+        G = self.G[rows]
+        n = np.arange(len(rows))
+        pos, neg, unk = y == 1, y == 0, np.isnan(y)
+        # Pending rows past the horizon (or whose negatives have all arrived) should have
+        # resolved: under the model their probability is ~0 and they carry no
+        # information, while clipping it would break the gradient. Leave them out.
+        unk &= (a < H) & (G < 0.999)
+        in_current = kstar == a + 1  # arrived during the month being lived now
+
+        nll = self._objective(z, new, slot, a, frac, kstar, G, pos, neg, unk, in_current)
+
+        bounds = [(-5, 5), (-5, 5)] + [(0, 0.5)] * self.K
+        key = (history.now, len(history.proba), float(history.proba[:1000].sum()), self.ref.get("prevalence"))
+        if key in _HAZARD_FITS:  # same deployment and decision time, fitted by another task
+            self.last_delta, self.last_delta_old, self.last_kappa = _HAZARD_FITS[key]
+            return
+        # warm start from the previous decision time: consecutive periods are similar
+        x0 = getattr(self, "_x0", None)
+        if x0 is None or len(x0) != self.K + 2:
+            x0 = np.zeros(self.K + 2)
+        x0 = np.clip(x0, [b[0] for b in bounds], [b[1] for b in bounds])
+        res = minimize(nll, x0=x0, jac=True, method="L-BFGS-B", bounds=bounds)
+        self._x0 = res.x
+        self.last_delta, self.last_delta_old, self.last_kappa = float(res.x[0]), float(res.x[1]), res.x[2:]
+        _HAZARD_FITS[key] = (self.last_delta, self.last_delta_old, self.last_kappa)
+
+    def _objective(self, z, new, slot, a, frac, kstar, G, pos, neg, unk, in_current):
+        """Negative log-likelihood (+ ridge) and its analytic gradient in
+        (delta_new, delta_old, kappa_1..K)."""
+        H, K, Fm = self._H, self.K, self._Fm
+        n = np.arange(len(z))
+        nxt = np.minimum(a + 1, H)
+        zero = np.zeros((len(z), 1))
+        # d cum / d lambda_m: months lived in calendar slot m (fixed)
+        dcum_k = [np.concatenate([zero, np.cumsum(slot == m, axis=1)], axis=1).astype(float)
+                  for m in range(K)]
+
+        def at(arr, cols):  # arr: n x (H+1) [x extra], pick column per row
+            return arr[n, cols]
+
+        def f(theta):
+            kappa = theta[2:]
+            # Bound the logit so p < 1: at p = 1 the hazard is infinite and the
+            # line search fails. The derivative is 0 where the bound is active.
+            u_raw = z + np.where(new, theta[0], theta[1])
+            u = np.clip(u_raw, -15.0, 9.0)
+            p = _sigmoid(u)
+            pF = p[:, None] * Fm[None, :]                               # n x (H+1), < 1
+            L = np.log1p(-pF[:, :-1]) - np.log1p(-pF[:, 1:])            # n x H
+            # dL/dp, then chain rule through dp/ddelta = p(1-p)
+            dLdp = -Fm[None, :-1] / (1 - pF[:, :-1]) + Fm[None, 1:] / (1 - pF[:, 1:])
+            shock = np.where(slot >= 0, kappa[np.maximum(slot, 0)], 0.0) if K else 0.0
+            zero = np.zeros((len(z), 1))
+            cum = np.concatenate([zero, np.cumsum(L + shock, axis=1)], axis=1)
+            dpdu = p * (1 - p) * (u == u_raw)
+            dcum_d = np.concatenate([zero, np.cumsum(dLdp, axis=1)], axis=1) * dpdu[:, None]
+
+            def now(arr):
+                return at(arr, a) + frac * (at(arr, nxt) - at(arr, a))
+
+            S = np.exp(-cum)
+            c_now = now(cum)
+            S_now = np.exp(-c_now)
+            grads = [dcum_d * new[:, None], dcum_d * ~new[:, None]] + dcum_k  # each n x (H+1)
+            g_now = [now(g) for g in grads]
+            g_H = [g[:, H] for g in grads]
+            S_H = S[:, H]
+
+            # positives: log(S(k*-1) - U), U = S(k*) or S_now for the current month
+            lo = at(S, kstar - 1)
+            hi = np.where(in_current, S_now, at(S, kstar))
+            den_p = np.clip(lo - hi, 1e-300, None)
+            ll = np.log(den_p[pos]).sum()
+            g = np.zeros(K + 2)
+            for j, gr in enumerate(grads):
+                d_lo = -lo * at(gr, kstar - 1)
+                d_hi = -hi * np.where(in_current, g_now[j], at(gr, kstar))
+                g[j] += ((d_lo - d_hi)[pos] / den_p[pos]).sum()
+            # negatives: log S(H) = -cum(H)
+            ll += -cum[neg, H].sum()
+            for j in range(K + 2):
+                g[j] += -g_H[j][neg].sum()
+            # pending: log(S_now - S(H) G)
+            den_u = np.clip(S_now - S_H * G, 1e-300, None)
+            ll += np.log(den_u[unk]).sum()
+            for j in range(K + 2):
+                d = -S_now * g_now[j] + S_H * G * g_H[j]
+                g[j] += (d[unk] / den_u[unk]).sum()
+
+            obj = -ll + self.ridge * np.sum(kappa ** 2)
+            grad = -g
+            grad[2:] += 2 * self.ridge * kappa
+            return obj, grad
+
+        return f
+
+    # -- estimates ---------------------------------------------------------------
+
+    def estimate_inflight(self, metric, history, target):
+        self._ensure_fit(history)
+        idx = np.flatnonzero(target)
+        proba = history.proba[idx]
+        y = history.y_known[idx]
+        if self._H is None:  # no curves: plain CBPE on pending rows
+            c = np.where(np.isnan(y), self.calibrator.predict(proba), y)
+            return self._metric(metric, proba, c)
+        slot, a, frac, _ = self._grid(history, idx)
+        cum = self._cum(self._increments(self._adjusted(proba)), slot, self.last_kappa)
+        Sa, SH = np.exp(-self._cum_now(cum, a, frac)), np.exp(-cum[:, -1])
+        G = self.G[idx]
+        posterior = (Sa - SH) / np.clip(Sa - SH * G, 1e-12, None)
+        c = np.where(np.isnan(y), np.clip(posterior, 0, 1), y)
+        return self._metric(metric, proba, c)
+
+
 class LabelsToDate(Estimator):
     """In-flight book only: metric on the labels arrived so far, counting the rest as negative.
 
@@ -353,4 +575,4 @@ class LabelsToDate(Estimator):
 
 def default_estimators(freq: str = "M") -> list[Estimator]:
     return [ReferencePerformance(), RecentArrivals(), LatestCompleteCohort(freq=freq),
-            CBPE(), ATC(), DoC(), DelayAdjustedCBPE()]
+            CBPE(), ATC(), DoC(), DelayAdjustedCBPE(), HazardAdjustedCBPE()]

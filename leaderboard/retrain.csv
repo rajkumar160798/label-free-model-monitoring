@@ -1,10 +1,10 @@
 method,mean_rank,wins,cases,mean_value
-every_k (best k),1.5,5,8,0.09399566045579998
-retrain on latest_complete_cohort alarm,2.75,0,8,0.1168286229644063
-retrain on recent_arrivals alarm,3.25,2,8,0.12836021698799752
-never,4.375,1,8,0.17892062797242694
-retrain on domain_classifier,4.375,0,8,0.18372618140650052
-retrain on psi_max,4.375,0,8,0.19656967079834867
-retrain on cbpe alarm,4.625,0,8,0.18895302255588928
-retrain on score_ks,5.0,0,8,0.1977468001503427
-always,5.25,0,8,0.20472620580873094
+every_k (best k),1.625,5,8,0.09090650193958687
+retrain on recent_arrivals alarm,3.375,1,8,0.13320796226119422
+retrain on latest_complete_cohort alarm,3.375,0,8,0.12323950293903
+retrain on cbpe alarm,3.625,1,8,0.17484187226806522
+retrain on domain_classifier,4.125,0,8,0.1740409967817743
+retrain on psi_max,4.125,0,8,0.18688448617362244
+never,4.375,1,8,0.17409252072809364
+retrain on score_ks,4.75,0,8,0.18806161552561648
+always,5.0,0,8,0.1950410211840047

@@ -163,3 +163,48 @@ def test_delay_adjusted_cbpe_does_not_overshoot_after_calendar_burst():
                          estimators=[DelayAdjustedCBPE(), LatestCompleteCohort(freq="M")])
     err = res.summary().loc["prevalence", "mae"]
     assert err["da_cbpe"] <= err["latest_complete_cohort"], err
+
+
+def test_hazard_cbpe_handles_calendar_burst():
+    from lfmm.estimators import HazardAdjustedCBPE, LatestCompleteCohort
+
+    s = calendar_shock_stream()
+    res = run_estimation(s, "2012-07-01", freq="Q", metrics=("prevalence",),
+                         estimators=[HazardAdjustedCBPE(), LatestCompleteCohort(freq="M")])
+    err = res.summary().loc["prevalence", "mae"]
+    assert err["da_cbpe_hz"] <= err["latest_complete_cohort"], err
+
+
+def test_hazard_cbpe_keeps_lasting_shift_accuracy():
+    from lfmm.estimators import DelayAdjustedCBPE, HazardAdjustedCBPE
+
+    s = natural_delay_stream()
+    res = run_estimation(s, "2012-07-01", freq="Q", metrics=("prevalence",),
+                         estimators=[DelayAdjustedCBPE(), HazardAdjustedCBPE()])
+    err = res.summary().loc["prevalence", "mae"]
+    assert err["da_cbpe_hz"] <= 1.3 * err["da_cbpe"], err
+
+
+def test_hazard_cbpe_without_calendar_terms_matches_delay_adjusted():
+    """With no kappa the hazard likelihood is the delay-adjusted one: same offsets."""
+    from lfmm.estimators import DelayAdjustedCBPE, HazardAdjustedCBPE
+
+    s = natural_delay_stream(n_months=48)
+    deltas = {"da": [], "hz": []}
+
+    class DA(DelayAdjustedCBPE):
+        def _fit(self, h):
+            super()._fit(h)
+            deltas["da"].append(self.last_delta)
+
+    class HZ(HazardAdjustedCBPE):
+        def __init__(self):
+            # same window as da_cbpe, one cohort group, no calendar shocks
+            super().__init__(calendar_months=0, window_months=12, new_cohort_months=12, max_rows=50_000)
+
+        def _fit(self, h):
+            super()._fit(h)
+            deltas["hz"].append(self.last_delta)
+
+    run_estimation(s, "2012-07-01", freq="Q", metrics=("prevalence",), estimators=[DA(), HZ()])
+    assert np.allclose(deltas["da"], deltas["hz"], atol=0.05), deltas

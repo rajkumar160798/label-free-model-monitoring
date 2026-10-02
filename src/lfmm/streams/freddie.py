@@ -10,6 +10,8 @@ Label arrival is real, not simulated:
 - positive: known in the reporting month of the first credit event;
 - negative: known once the loan reaches age ``horizon`` without an event, or
   when it prepays earlier;
+- age is counted in calendar months from the first payment, not from the
+  reported LOAN AGE, which Freddie Mac resets when a loan is modified;
 - otherwise (data ends first, or rare terminations such as defects) the label
   never arrives and ``y`` is NaN.
 
@@ -68,12 +70,20 @@ def _read_year(zpath: Path, year: int, horizon: int) -> pl.DataFrame:
                            columns=list(PERF_COLUMNS), new_columns=list(PERF_COLUMNS.values()),
                            infer_schema=False)
 
-    perf = perf.with_columns(
+    # Age from the calendar, not the reported LOAN AGE: Freddie Mac resets loan age
+    # when a loan is modified, which would let defaults years later count as
+    # "within the window". Reporting starts the month before the first payment, so
+    # age = months since first payment + 1 (matching LOAN AGE for unmodified loans).
+    first_pay = orig.select("loan_id", _month("first_payment_date").alias("first_pay"))
+    perf = perf.join(first_pay, on="loan_id", how="left").with_columns(
         _month("period").alias("period"),
-        pl.col("loan_age").cast(pl.Int32),
         pl.col("dlq").cast(pl.Int32, strict=False).alias("dlq_months"),
+    ).with_columns(
+        ((pl.col("period").dt.year() - pl.col("first_pay").dt.year()) * 12
+         + pl.col("period").dt.month().cast(pl.Int32) - pl.col("first_pay").dt.month().cast(pl.Int32)
+         + 1).alias("age"),
     )
-    in_window = pl.col("loan_age") <= horizon
+    in_window = pl.col("age") <= horizon
     event = (
         (pl.col("dlq_months") >= 3) | (pl.col("dlq") == "RA") | pl.col("zb_code").is_in(CREDIT_LOSS_ZB)
     ) & in_window
@@ -82,7 +92,7 @@ def _read_year(zpath: Path, year: int, horizon: int) -> pl.DataFrame:
     outcomes = perf.group_by("loan_id").agg(
         pl.col("period").filter(event).min().alias("event_month"),
         pl.col("period").filter(prepaid).min().alias("prepaid_month"),
-        pl.col("period").filter(pl.col("loan_age") == horizon).min().alias("horizon_month"),
+        pl.col("period").filter(pl.col("age") >= horizon).min().alias("horizon_month"),
     )
     return orig.join(outcomes, on="loan_id", how="left")
 
