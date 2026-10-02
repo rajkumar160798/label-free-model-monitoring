@@ -65,13 +65,9 @@ def timeline(ax, records: pd.DataFrame, metric: str, title: str, pct: bool):
     ax.set_ylim(bottom=0 if pct else None)
 
 
-def main():
-    FIGURES.mkdir(exist_ok=True)
-    plt.rcParams.update({"font.family": "DejaVu Sans", "figure.facecolor": SURFACE})
-
-    batch = pd.read_csv(RESULTS / "freddie_2007_records.csv")
-    book = pd.read_csv(RESULTS / "inflight_freddie_2007_records.csv")
-
+def default_rate_figure(name: str, built: str) -> None:
+    batch = pd.read_csv(RESULTS / f"{name}_records.csv")
+    book = pd.read_csv(RESULTS / f"inflight_{name}_records.csv")
     fig, axes = plt.subplots(2, 1, figsize=(9, 7.2), sharex=True)
     timeline(axes[0], batch, "prevalence",
              "New batch: eventual 24-month default rate of loans starting this quarter", pct=True)
@@ -80,21 +76,91 @@ def main():
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, fontsize=9,
                labelcolor=INK_2, bbox_to_anchor=(0.5, 1.0))
-    fig.suptitle("Freddie Mac, model built Jan 2007: estimated vs true default rate",
+    fig.suptitle(f"Freddie Mac, model built {built}: estimated vs true default rate",
                  x=0.01, ha="left", y=1.045, color=INK, fontsize=12.5, fontweight="bold")
     fig.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(FIGURES / f"freddie_2007_default_rate.{ext}", dpi=200, bbox_inches="tight")
+        fig.savefig(FIGURES / f"{name}_default_rate.{ext}", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+
+def auc_figure(name: str) -> None:
+    batch = pd.read_csv(RESULTS / f"{name}_records.csv")
     fig, ax = plt.subplots(figsize=(9, 3.8))
     timeline(ax, batch, "roc_auc", "New batch: AUC of the frozen model", pct=False)
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.08), frameon=False, fontsize=9, ncol=3,
               labelcolor=INK_2)
     fig.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(FIGURES / f"freddie_2007_auc.{ext}", dpi=200, bbox_inches="tight")
+        fig.savefig(FIGURES / f"{name}_auc.{ext}", dpi=200, bbox_inches="tight")
     plt.close(fig)
+
+
+# Detector families: estimator alarms (slot 1) vs input/output drift tests (slot 2).
+DETECTOR_NAMES = {
+    "da_cbpe": ("DA-CBPE alarm (ours)", "estimator"), "cbpe": ("CBPE alarm", "estimator"),
+    "latest_complete_cohort": ("Complete cohort", "estimator"), "recent_arrivals": ("Recent arrivals", "estimator"),
+    "adwin_scores": ("ADWIN (scores)", "drift"), "adwin_errors": ("ADWIN (arrived errors)", "drift"),
+    "score_ks": ("KS (scores)", "drift"), "univariate_tests": ("univariate KS/χ²", "drift"),
+    "psi_max": ("PSI", "drift"), "mmd": ("MMD", "drift"), "domain_classifier": ("domain classifier", "drift"),
+}
+FAMILY = {"estimator": ("Alarm from a performance estimate", "#2a78d6"),
+          "drift": ("Drift / change test", "#eb6834")}
+
+
+def detection_figure() -> None:
+    rows = []
+    for f in RESULTS.glob("detection_*_summary.csv"):
+        d = pd.read_csv(f)
+        d["family"] = d["detector"].str.split(":").str[0]
+        rows.append(d[["family", "spearman", "alarm_rate"]])
+    df = pd.concat(rows).groupby("family").median()
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    for fam_key, (fam_label, color) in FAMILY.items():
+        sub = df[[DETECTOR_NAMES[k][1] == fam_key for k in df.index]]
+        ax.scatter(sub["alarm_rate"], sub["spearman"], s=70, color=color, label=fam_label,
+                   edgecolor=SURFACE, linewidth=2, zorder=3)
+    # One label per group of (nearly) coincident points, so stacked points stay readable.
+    groups: list[list[str]] = []
+    for k in df.sort_values("spearman", ascending=False).index:
+        for g in groups:
+            r0 = df.loc[g[0]]
+            if abs(df.loc[k, "alarm_rate"] - r0["alarm_rate"]) < 0.02 and abs(df.loc[k, "spearman"] - r0["spearman"]) < 0.012:
+                g.append(k)
+                break
+        else:
+            groups.append([k])
+    offsets = {"cbpe": (8, 5), "adwin_scores": (8, -12)}
+    for g in groups:
+        r = df.loc[g].mean()
+        text = ", ".join(DETECTOR_NAMES[k][0] for k in g)
+        right_edge = r["alarm_rate"] > 0.8
+        dx, dy = offsets.get(g[0], (-10 if right_edge else 8, -3))
+        ax.annotate(text, (r["alarm_rate"], r["spearman"]), xytext=(dx, dy), textcoords="offset points",
+                    fontsize=8.5, color=INK_2, ha="right" if dx < 0 else "left")
+    _style(ax)
+    ax.grid(axis="x", color=GRID, lw=0.8)
+    ax.set_xlim(-0.03, 1.08)
+    ax.set_xlabel("median share of periods with an alarm", color=INK_2, fontsize=9)
+    ax.set_ylabel("median Spearman with true degradation", color=INK_2, fontsize=9)
+    ax.set_title("Detectors over 16 cases: drift tests alarm in every period", loc="left", color=INK,
+                 fontsize=11, pad=10)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.06), ncol=2, frameon=False, fontsize=9,
+              labelcolor=INK_2)
+    fig.tight_layout()
+    for ext in ("png", "pdf"):
+        fig.savefig(FIGURES / f"detection_overview.{ext}", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def main():
+    FIGURES.mkdir(exist_ok=True)
+    plt.rcParams.update({"font.family": "DejaVu Sans", "figure.facecolor": SURFACE})
+    default_rate_figure("freddie_2007", "Jan 2007")
+    default_rate_figure("freddie_2016", "Jan 2016")
+    auc_figure("freddie_2007")
+    auc_figure("freddie_2016")
+    detection_figure()
     print("wrote", sorted(p.name for p in FIGURES.iterdir()))
 
 

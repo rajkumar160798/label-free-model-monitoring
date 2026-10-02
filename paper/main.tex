@@ -7,6 +7,20 @@
 \usepackage{hyperref}
 \usepackage{xcolor}
 \usepackage{microtype}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{listings}
+
+\definecolor{codebg}{HTML}{F6F6F4}
+\definecolor{codecomment}{HTML}{52514E}
+\definecolor{codekw}{HTML}{1F5FAE}
+\lstset{
+  language=Python, basicstyle=\ttfamily\footnotesize, backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw}\bfseries, commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codecomment}, showstringspaces=false, frame=single, rulecolor=\color{codebg},
+  framesep=4pt, xleftmargin=6pt, xrightmargin=6pt, columns=fullflexible, keepspaces=true,
+  breaklines=true, captionpos=b, upquote=true,
+}
 
 % Placeholder for numbers still to be filled in.
 \newcommand{\TBD}[1]{\textcolor{red}{[TBD: #1]}}
@@ -14,7 +28,7 @@
 \title{Monitoring Models Before the Labels Arrive:\\
 A Benchmark for Performance Estimation, Drift Detection and Retraining\\
 under Natural Drift and Label Delay}
-\author{Raj Kumar Myakala\\ CVS Health}
+\author{Raj Kumar Myakala\\ Independent Researcher\\}
 \date{}
 
 \begin{document}
@@ -176,6 +190,33 @@ retrains. We report regret against the hindsight-optimal schedule, found by dyna
 programming over which model serves each period, for $\lambda = \rho \cdot g$, where $g$ is the
 average gain of one retrain under ``always retrain'' and $\rho \in \{0, 0.25, 1, 4\}$.
 
+\paragraph{Protocol.} All four tasks share one walk-forward loop (Algorithm~\ref{alg:protocol}).
+Its only source of information about labels is the set $\mathcal{K}(s) = \{i : \tau_i \le s\}$, so
+a monitor cannot see a label before it would have arrived. The true metric of a batch is computed
+from labels the monitor never sees, and only for batches whose labels eventually resolve (at
+least 90\%); later batches still receive estimates but are not scored. This is the real
+``labels have not arrived'' frontier: for Freddie Mac it begins in 2024Q2.
+
+\begin{algorithm}[t]
+\caption{Walk-forward evaluation shared by all tasks}
+\label{alg:protocol}
+\begin{algorithmic}[1]
+\Require stream $\{(x_i, y_i, t_i, \tau_i)\}$, training date $s_0$, period length (month/quarter/year)
+\State $C \gets$ cohorts (periods) before $s_0$ whose labels are $\ge 95\%$ arrived by $s_0$
+\State fit model $f$ on $C$ minus its last 12 months; reference window $R \gets$ last 12 months of $C$
+\State calibrate each monitor $m$ on $\{(f(x_i), y_i) : i \in R\}$
+\For{each period $P$ starting at or after $s_0$, in time order}
+  \State $s \gets$ end of $P$; \quad $B \gets \{i : t_i \in P\}$; \quad $\mathcal{H} \gets \{i : t_i < \text{start of } P\}$
+  \State history $\gets \{(f(x_i), t_i)\}_{i \in \mathcal{H}} \cup \{(y_i, \tau_i) : i \in \mathcal{H},\ \tau_i \le s\}$
+  \State $\hat{v}_m \gets m(\{f(x_i), x_i\}_{i \in B}, \text{history})$ \Comment{estimate, drift score or alarm}
+  \If{labels of $\ge 90\%$ of $B$ ever resolve}
+    \State $v \gets$ metric of $f$ on $\{(f(x_i), y_i) : i \in B\}$ \Comment{hidden from every monitor}
+    \State record $(P, m, \hat{v}_m, v)$
+  \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
 \section{Delay-adjusted CBPE}\label{sec:method}
 
 CBPE treats calibrated scores $c_i$ as the probability each row is positive. Under concept
@@ -199,6 +240,30 @@ complete labels.
 AUC from all positive--negative pairs; expected accuracy and positive rate in closed form). For
 the in-flight book, arrived labels count as observed and pending rows use the posterior
 $P(y_i = 1 \mid \text{pending}) = p_i(1-F(a_i)) / (1 - p_i F(a_i) - (1-p_i) G(a_i))$.
+Algorithm~\ref{alg:dacbpe} summarizes the procedure.
+
+\begin{algorithm}[t]
+\caption{Delay-adjusted CBPE at decision time $s$}
+\label{alg:dacbpe}
+\begin{algorithmic}[1]
+\Require calibrator $c(\cdot)$ fit on the reference window; history with arrived labels; batch scores
+\State $D \gets$ longest observed delay $\tau_i - t_i$ among arrived labels
+\State $M \gets$ rows with arrived labels and age $s - t_i \in [D, D + 36\text{ months})$ \Comment{mature rows}
+\State $F, G \gets$ empirical CDFs of delays of positives / negatives in $M$
+\State $W \gets$ rows of the last 12 months that are labeled or have $F(\text{age}) > 0.05$
+\State $\hat\delta \gets \arg\max_\delta \sum_{i \in W} \log \ell_i(\delta)$, \quad $p_i(\delta) = \sigma(\operatorname{logit} c(f(x_i)) + \delta)$,
+\Statex \hspace{\algorithmicindent} $\ell_i = p_i$ (arrived positive), $1 - p_i$ (arrived negative), $1 - p_i F(a_i) - (1 - p_i) G(a_i)$ (pending)
+\State \textbf{new batch:} CBPE with $p_i(\hat\delta)$: positive rate $\frac{1}{n}\sum p_i$, expected AUC over pairs, expected accuracy
+\State \textbf{in-flight book:} $q_i = y_i$ if arrived, else $p_i(1 - F(a_i)) / (1 - p_i F(a_i) - (1-p_i) G(a_i))$; metric from $q$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Expected AUC.} Given probabilities $q_i$ that row $i$ is positive and scores $f_i$,
+\[ \mathbb{E}[\mathrm{AUC}] \approx \frac{\sum_{i \ne j} q_i (1 - q_j) \left( \mathbb{1}[f_i > f_j] + \tfrac12 \mathbb{1}[f_i = f_j] \right)}
+{\sum_i q_i \sum_j (1 - q_j) - \sum_i q_i (1 - q_i)}, \]
+computed in $O(n \log n)$ by grouping equal scores and cumulating $1 - q$ over sorted scores (a
+ratio-of-expectations approximation, exact as $n$ grows). A unit test checks it against Monte
+Carlo draws of the labels.
 
 \paragraph{Calendar-time shocks.} The development pattern $F$ is assumed stable. A shock that
 hits rows of every age at once violates it: during COVID forbearance, loans of all ages became
@@ -221,7 +286,25 @@ signed period effects ``nearly every row will be positive, just slowly'' fits as
 truth. Second, shocks are additive rather than proportional to each row's hazard, since
 forbearance-type shocks hit safe and risky rows alike. New rows are projected with the newest
 cohort's shift only; bursts are counted but not extrapolated. We fit by L-BFGS-B with analytic
-gradients.
+gradients (Algorithm~\ref{alg:hazard}); Appendix~\ref{app:hazard} records the design choices that
+the model needs to work, several of which we learned by failure.
+
+\begin{algorithm}[t]
+\caption{Hazard variant (DA-CBPE-HZ) at decision time $s$}
+\label{alg:hazard}
+\begin{algorithmic}[1]
+\State $F, G \gets$ arrival curves as in Algorithm~\ref{alg:dacbpe}; $H \gets \lceil q_{0.995}(\text{positive delays}) \rceil$ months
+\State $F \gets 0.99\,F + 0.01\,k/H$ on the monthly grid $k = 0..H$ \Comment{no month with zero arrival mass}
+\State $W \gets$ informative rows of the last 24 months, minus pending rows past $H$; $g(i) \in \{\text{new}, \text{old}\}$ by cohort age $< 12$ months
+\State for each row: calendar month $t_i(k)$ of every age month $k \le$ current age $a_i$ (the current partial month counted pro rata)
+\State $\theta = (\delta_{\text{new}}, \delta_{\text{old}}, \lambda_1..\lambda_{24})$; \quad $p_i = \sigma(\operatorname{logit} c_i + \delta_{g(i)})$
+\State $S_i(k) = \exp\!\big(-\sum_{j \le k} [\log\frac{1 - p_i F(j-1)}{1 - p_i F(j)} + \lambda_{t_i(j)}]\big)$
+\State $\hat\theta \gets \arg\min_\theta -\sum_{i \in W} \log \ell_i(\theta) + \sum_t \lambda_t^2$ \ s.t.\ $\lambda_t \ge 0$ \Comment{L-BFGS-B, analytic gradient, warm start}
+\Statex \hspace{\algorithmicindent} $\ell_i = S_i(k^*_i - 1) - S_i(\min(k^*_i, a_i))$ (positive), $S_i(H)$ (negative), $S_i(a_i) - S_i(H)\,G(a_i)$ (pending)
+\State \textbf{new batch:} CBPE with $p_i(\hat\delta_{\text{new}})$ \Comment{bursts not projected forward}
+\State \textbf{in-flight book:} arrived labels as observed; pending rows $q_i = \frac{S_i(a_i) - S_i(H)}{S_i(a_i) - S_i(H)\,G(a_i)}$ with fitted $\lambda$
+\end{algorithmic}
+\end{algorithm}
 
 \section{Results}\label{sec:results}
 
@@ -232,7 +315,17 @@ shift Freddie Mac's inputs without necessarily hurting the model. Their scores s
 severity moderately (median $\rho$ 0.37--0.49), but their thresholds are unusable. The
 delay-adjusted alarm both ranks degradation best (median $\rho$ 0.58) and alarms selectively
 (32\% of periods, precision 0.84). ADWIN on arriving errors, the classic streaming setup, ranks
-last: under delay it sees too little, too late.
+last: under delay it sees too little, too late. Figure~\ref{fig:detection} shows the trade-off;
+per-experiment correlations and alarm statistics are in Appendix~\ref{app:results}
+(Tables~\ref{tab:det-spearman} and~\ref{tab:det-alarms}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{../figures/detection_overview.pdf}
+\caption{Each detector's median alarm rate against its median rank correlation with true
+degradation, over 16 cases. Every input-drift test sits at an alarm rate of 1.0.}
+\label{fig:detection}
+\end{figure}
 
 \begin{table}[t]
 \centering
@@ -276,7 +369,8 @@ against 0.0087 for the best label-based baseline, and its AUC error 0.0180 again
 block-bootstrap intervals of the paired differences exclude zero (default rate: $-0.0034$
 [$-0.0076$, $-0.0004$] vs.\ waiting for complete cohorts; AUC: $-0.0058$ [$-0.0126$, $-0.0001$]
 vs.\ labels to date). The exception is freddie\_2016 AUC, where labels to date is better (0.0263
-vs.\ 0.0287; interval includes zero).
+vs.\ 0.0287; interval includes zero). All paired comparisons are in Table~\ref{tab:inflight-ci};
+the accuracy-only estimators ATC and DoC are compared in Table~\ref{tab:accuracy}.
 
 Figure~\ref{fig:freddie} shows the mechanism. CBPE stays near the reference default rate through
 the 2007--08 crisis (loans made in 2008Q1: true 6.6\%, CBPE 1.0\%). Waiting for complete cohorts
@@ -310,6 +404,37 @@ helps on Freddie Mac: retraining on alarms from recently arrived labels wins on 
 on CBPE alarms on freddie\_2016. Retraining on input-drift alarms is equivalent to always
 retraining, since those tests always fire: cheapest when retraining is free, among the worst once
 it costs anything. On tabred\_ecom retraining never pays: newer models train on too little data.
+Full regret tables are in Appendix~\ref{app:results} (Table~\ref{tab:retrain}).
+
+\section{Software}\label{sec:software}
+
+The benchmark is a Python package, \texttt{lfmm}, released under the MIT license with all
+experiment scripts.\footnote{\url{https://github.com/rajkumar160798/label-free-model-monitoring}}
+It has four parts: downloaders that record every source file's URL and SHA-256 checksum; stream
+loaders that build the label and its arrival time from the raw files; the four tasks; and the
+methods, each a small class with \texttt{fit} on the reference window and one method that
+answers the task. Listing~\ref{lst:estimate} runs the estimation task on any stream; adding a
+method means subclassing \texttt{Estimator}, \texttt{Detector} or \texttt{Policy}
+(Appendix~\ref{app:code}). Every listing in this paper is a runnable file in the repository's
+\texttt{paper/snippets/} folder.
+
+\begin{lstlisting}[caption={Estimating performance on a stream with delayed labels.}, label={lst:estimate}]
+from lfmm.estimators import CBPE, DelayAdjustedCBPE, LatestCompleteCohort
+from lfmm.harness import run_estimation
+
+# Train on fully labeled cohorts before 2023, freeze, walk forward monthly.
+result = run_estimation(
+    stream, train_end="2023-01-01", freq="M", metrics=("roc_auc", "prevalence"),
+    estimators=[CBPE(), DelayAdjustedCBPE(), LatestCompleteCohort(freq="M")],
+)
+print(result.summary())                     # MAE and bias per estimator
+print(result.bootstrap_mae("prevalence"))   # 95% block-bootstrap intervals
+print(result.compare("prevalence", "da_cbpe", "cbpe"))
+\end{lstlisting}
+
+Everything runs on a 16-core desktop without a GPU. Single task runs take from under a minute to
+under half an hour per experiment (Appendix~\ref{app:impl}); the hazard estimator and the
+domain-classifier and MMD detectors dominate the time.
 
 \section{Limitations}
 
@@ -328,5 +453,226 @@ directions, and that early-arriving labels, once their bias is corrected, close 
 
 \bibliographystyle{plainnat}
 \bibliography{references}
+
+\clearpage
+\appendix
+
+\section{Using the benchmark}\label{app:code}
+
+Every listing below is a file in \texttt{paper/snippets/} and runs as shown against the released
+package (it uses a small synthetic stream so it runs in seconds without downloading data).
+
+\lstinputlisting[caption={Building a stream from any table of scored events
+(\texttt{s1\_stream.py}).}, label={lst:stream}]{snippets/s1_stream.py}
+
+\lstinputlisting[caption={Adding an estimator: implement \texttt{estimate}, which sees the batch's
+scores and a \texttt{History} holding only labels that have arrived (\texttt{s3\_custom.py}).},
+label={lst:custom}]{snippets/s3_custom.py}
+
+\lstinputlisting[caption={Detection against an event definition, and the retrain-or-not task with
+fixed and alarm-triggered policies (\texttt{s4\_detect\_retrain.py}).},
+label={lst:detect}]{snippets/s4_detect_retrain.py}
+
+{\sloppy
+\paragraph{Running the paper's experiments.} The eight experiments are declared in
+\texttt{lfmm.experiments.EXPERIMENTS} (stream loader, training date, period length, metrics and
+event definitions). Each task has a script: \texttt{run\_estimation.py}, \texttt{run\_inflight.py},
+\texttt{run\_detection.py}, \texttt{run\_retrain.py} and \texttt{run\_seeds.py}; tables and figures
+are regenerated from their CSV outputs by \texttt{make\_tables.py}, \texttt{make\_appendix.py} and
+\texttt{make\_figures.py}. Raw data are fetched by \texttt{python -m lfmm.download}, which writes a
+manifest with the source URL and SHA-256 of every file; Freddie Mac and TabReD files, which need an
+account or accepted terms, are downloaded by hand and registered with the same command.\par}
+
+\section{Dataset construction}\label{app:data}
+
+\begin{table}[h]
+\centering
+\caption{Streams after construction. Rows are those used in the experiments (ACS and BRFSS are
+sampled per year from the full tables; NYC taxi keeps 50k card trips per month).}
+\label{tab:data}
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllrrrll}
+\toprule
+Stream & Source & Years & Rows used & Num. & Cat. & Target & Positive rate \\
+\midrule
+Freddie Mac & SFLLD sample & 1999--2026 & 1,362,496 & 10 & 12 & default within 24 months & 0.4\%--4.8\% by year \\
+ACS income & Census PUMS & 2014--2024 & 1.0M (of 16.6M) & 5 & 6 & income $>$ \$50k & 31.7\%--49.1\% \\
+BRFSS & CDC survey & 2011--2024 & 1.68M (of 6.3M) & 8 & 17 & diagnosed diabetes & 12.4\%--14.6\% \\
+NYC taxi & TLC trip records & 2019--2021 & 1.8M (of 140M) & 13 & 4 & tip $\ge$ 25\% of fare & 54.8\%--61.9\% \\
+TabReD homecredit & TabReD & 2019--2020 & 381,664 & 612 & 82+2 bin. & loan default & 3.2\% \\
+TabReD homesite & TabReD & 2013--2015 & 260,753 & 253 & 23+23 bin. & quote conversion & 18.8\% \\
+TabReD ecom & TabReD & 2013 & 160,057 & 113 & 6 bin. & repeat purchase & 27.1\% \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\paragraph{Freddie Mac.} Origination features: credit score, mortgage-insurance percentage, number
+of units, combined and plain loan-to-value, debt-to-income, original balance, interest rate, term
+and number of borrowers (numeric); first-time buyer, occupancy, channel, state, property type,
+loan purpose, seller, super-conforming, program, relief refinance, valuation method and
+interest-only flags (categorical). Sentinel codes (e.g.\ 9999 for credit score, 999 for ratios) are
+set to missing. Identifiers, maturity date, MSA and postal code are dropped, and so is MI
+cancellation, which is observed after origination and would leak. The number-of-borrowers field
+changed coding in 2018Q2 (``2 or more'' became exact counts) and is capped at 2. The event is
+delinquency of 90 days or more, REO acquisition, or a zero-balance code for third-party sale,
+short sale, REO disposition or whole-loan sale, within 24 calendar months of the first payment.
+A negative is known at month 24 or at an earlier prepayment (zero-balance code 01); loans with
+neither never resolve. Four seller-owned modified loans whose first-payment date was reset years
+after origination are dropped. Counting the window by the reported loan age instead of calendar
+months would be wrong: Freddie Mac resets loan age at modification, which in a first version of
+this benchmark turned 17.7\% of positives into defaults that happened years later.
+
+\paragraph{ACS.} The Folktables ACSIncome task \citep{ding2021folktables}: employed adults (age
+$> 16$, income $> \$100$, hours $> 0$, weight $\ge 1$), features age, education, hours, occupation,
+place of birth (numeric) and class of worker, marital status, relationship, sex, race and state
+(categorical). From 2019 the relationship field RELP was replaced by RELSHIPP with new codes; we map
+RELSHIPP to RELP. The state column is ST until 2022 and STATE from 2023. Occupation codes switched to
+the 2018 SOC scheme in 2018 and are left as they are, as a production pipeline would see them.
+Income is nominal, so the positive rate rises with wages.
+
+\paragraph{BRFSS.} Interviews are ordered by interview month (a survey year's last interviews fall
+in the next calendar year). Variables renamed across years are merged (diabetes, sex, income,
+kidney disease, depression, arthritis, cost barrier, personal doctor, race). From 2021 the income
+variable splits the top band (\$50k+) into three; we cap it back to five bands. Employment is not
+asked in 2011--2012 and health insurance is not asked of all ages in 2021--2022; those values stay
+missing. Positive: ever told diabetes (excluding pregnancy-only); ``don't know'' and refusals are
+dropped.
+
+\paragraph{NYC taxi.} Credit-card trips only (cash tips are not recorded) with positive fare and
+distance, duration 1--180 minutes, and pickup and drop-off within the file's month. Features:
+passengers, distance, fare, surcharges and tolls, duration, hour, weekday, pickup and drop-off
+zone, vendor, rate code and store-and-forward flag. The total amount is excluded because it
+includes the tip; the airport fee exists only from 2021. The positive rate jumps from 25\% in
+January 2019 to 58\% from February, coinciding with the congestion surcharge introduced on
+1~February~2019 (we have not confirmed the cause), so the training window starts in February.
+
+\paragraph{TabReD.} The authors' preprocessed arrays \citep{rubachev2024tabred}; rows ordered by the
+timestamp in the first metadata column, which is in microseconds for homesite and in days for
+homecredit and ecom. TabReD's own splits are not used: the walk-forward protocol replaces them.
+
+\section{Implementation details}\label{app:impl}
+
+\paragraph{Model.} Scikit-learn's histogram gradient boosting (300 iterations, learning rate 0.08,
+early stopping on 10\% of the training rows, native categorical handling; categoricals with more
+than 250 levels become integer codes). Features that are missing or constant in the training rows
+are dropped. At most 500k training rows (300k for the retraining bank).
+
+\paragraph{Protocol.} Trainable cohorts need $\ge 95\%$ of labels arrived; reference window = the last
+12 months of trainable cohorts (a random 30\% when that would leave too little training data); truth
+requires $\ge 90\%$ of a batch's labels to resolve. Retraining uses the last 60 months of trainable
+cohorts.
+
+\paragraph{Estimators.} Recent arrivals: labels arrived in the last 90 days ($\ge 200$ rows). Latest
+complete cohort: newest monthly cohort with $\ge 95\%$ of labels arrived. CBPE: isotonic calibration
+on the reference window. ATC and DoC: as published, with confidence $\max(p, 1-p)$. DA-CBPE: 12-month
+fitting window, 36 months of mature rows for the arrival curves, up to 50k rows. Hazard variant:
+24-month window, cohort split at 12 months, 24 calendar months, ridge 1, up to 20k rows,
+$\lambda_t \in [0, 0.5]$, $\delta \in [-5, 5]$.
+
+\paragraph{Detectors.} Univariate: KS (numeric) and $\chi^2$ (categorical) with Bonferroni correction,
+scored by the largest effect size. PSI: 10 reference-quantile bins plus a missing bin, alarm at 0.25.
+KS on scores: alarm at $p < 0.05$. Domain classifier: gradient boosting (100 iterations) on up to 5k
+reference and 5k batch rows, 3-fold cross-validated AUC, alarm at 0.6. MMD: RBF kernel with median
+bandwidth on standardized numeric features and the score, 1k rows per side, 100 permutations, alarm at
+$p < 0.05$. ADWIN: $\delta = 0.002$, up to 2k values per batch. Estimator alarms fire when the estimate
+is worse than the reference by more than the experiment's alarm $\Delta$: AUC 0.05 and default rate
+0.01 for Freddie Mac; accuracy 0.03 and positive rate 0.05 for ACS; AUC 0.02 and positive rate 0.01
+for TabReD homecredit; AUC 0.02 and positive rate 0.02 for the others.
+
+\paragraph{Statistics.} Moving-block bootstrap over periods, block length 4, 2000 resamples; paired
+comparisons resample the per-period difference. Estimation is repeated over 5 seeds (model
+randomness, training subsample, and for ACS and BRFSS the per-year sample).
+
+\paragraph{Compute.} One 16-core Windows desktop, no GPU. Measured times: next-batch estimation
+under a minute per experiment without the hazard estimator; one hazard fit 3--11 seconds per
+Freddie Mac quarter; detection on both Freddie Mac experiments about 20 minutes; the retraining bank
+for freddie\_2016 about 8 minutes (33 models).
+
+\section{Designing the hazard variant}\label{app:hazard}
+
+The hazard variant took several attempts; each failure is instructive for anyone extending it.
+Table~\ref{tab:ablation} lists every version we tried on the two synthetic streams of
+Section~\ref{sec:results}, in the order we tried them.
+
+\begin{table}[h]
+\centering
+\caption{Design ablation on synthetic data (MAE of the positive rate). Each row adds one change to
+the previous one. The burst stream needs the calendar effect; the lasting-shift stream checks that
+fixing it does not break what already worked.}
+\label{tab:ablation}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrr}
+\toprule
+& \multicolumn{2}{c}{Calendar burst} & \multicolumn{2}{c}{Lasting shift} \\
+Version & next batch & in-flight & next batch & in-flight \\
+\midrule
+Chain-ladder DA-CBPE & 0.133 & 0.094 & \textbf{0.048} & \textbf{0.007} \\
++ arrival-speed effect $\kappa$, last 3 months & 0.159 & 0.127 & 0.053 & 0.011 \\
++ $\kappa_t$ per calendar month (ridge) & 0.187 & 0.151 & 0.060 & 0.020 \\
+Hazard model, proportional shocks, signed $\kappa_t$ & 0.181 & 0.136 & 0.059 & 0.014 \\
++ shocks constrained to $\kappa_t \ge 0$ & 0.080 & 0.056 & 0.052 & 0.009 \\
++ additive shocks, two cohort shifts, 24-month window (final) & \textbf{0.039} & \textbf{0.030} & 0.061 & 0.010 \\
+\midrule
+Latest complete cohort (baseline) & 0.082 & 0.053 & 0.110 & 0.050 \\
+CBPE (baseline) & 0.030 & 0.055 & 0.125 & 0.065 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{enumerate}
+  \item \textbf{A shock must be able to add positives, not only make them arrive sooner.} The first
+  two versions only changed arrival timing; whether a row is positive could then only come from
+  $\delta$, so the burst was still read as a lasting shift.
+  \item \textbf{Shocks must be non-negative.} Recent rows have no resolved negatives yet. With signed
+  period effects, ``nearly every row will be positive, just slowly'' explains the data as well as the
+  truth, and the optimizer drove $\delta$ to its bound.
+  \item \textbf{Shocks should be additive.} A forbearance-type shock adds a similar hazard to safe and
+  risky loans; a proportional shock cannot reach safe loans and pushes the excess back into $\delta$.
+  \item \textbf{Older cohorts identify the shock.} A calendar burst raises arrivals for all ages, a
+  cohort shift only for new loans. With a 24-month window and separate shifts for new and older
+  cohorts, the two are separable; with 12 months of young loans they are not.
+  \item \textbf{Survival must be credited to the exact current age.} Flooring ages to whole months
+  counted arrivals in the current month without crediting the survival that preceded them; that
+  alone biased $\delta$ up by about 0.15 (with shocks switched off, the model should and now does
+  reproduce the chain-ladder $\delta$ to within 0.01).
+  \item \textbf{Real arrival curves need care.} On Freddie Mac, the empirical curve has months with
+  no arrival mass (defaults almost never arrive in month 1), which gave some arrivals probability zero
+  and broke the line search; we blend in 1\% of a uniform curve. The grid length uses the 99.5th
+  percentile of delays, and pending rows that should already have resolved are left out.
+\end{enumerate}
+
+\section{Additional results}\label{app:results}
+
+\input{tables/detection_spearman.tex}
+\input{tables/detection_alarms.tex}
+\input{tables/retrain.tex}
+\input{tables/inflight_ci.tex}
+\input{tables/accuracy.tex}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{../figures/freddie_2016_default_rate.pdf}
+\caption{Freddie Mac, model built January 2016 (COVID is the main shock). Top: next-batch default
+rate; bottom: in-flight book.}
+\label{fig:freddie16}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{../figures/freddie_2007_auc.pdf}
+\caption{Freddie Mac, model built January 2007: next-batch AUC. AUC moves less than the default
+rate; label-free estimates of it stay smooth while the complete-cohort baseline is noisy.}
+\label{fig:auc07}
+\end{figure}
+
+\section{Data access and licenses}\label{app:license}
+
+ACS, BRFSS and NYC taxi records are US public-sector releases. Freddie Mac's loan-level data are free
+for non-commercial research but may not be redistributed; TabReD combines Yandex data for
+non-commercial research with Kaggle competition data under their rules. The repository therefore
+contains no raw data: only download code, checksums, loaders and aggregated results. All sources are
+de-identified public releases; the benchmark adds no personal data.
 
 \end{document}

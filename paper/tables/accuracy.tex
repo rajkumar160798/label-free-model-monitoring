@@ -1,0 +1,15 @@
+\begin{table}[h]
+\centering
+\caption{Accuracy estimation, including the accuracy-only estimators ATC and DoC (balanced-class streams). MAE, mean (std) over 5 seeds.}
+\label{tab:accuracy}
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Experiment & Ref. & Complete & CBPE & ATC & DoC & DA-CBPE & DA-CBPE-HZ \\
+\midrule
+acs\_income\_2016 & 0.0369 (0.0018) & \textbf{0.0087 (0.0002)} & 0.0314 (0.0024) & 0.0294 (0.0045) & 0.0311 (0.0022) & 0.0145 (0.0020) & 0.0154 (0.0021) \\
+tlc\_2019 & 0.0062 (0.0005) & \textbf{0.0031 (0.0000)} & 0.0055 (0.0004) & 0.0120 (0.0051) & 0.0053 (0.0004) & 0.0086 (0.0003) & 0.0144 (0.0005) \\
+\bottomrule
+\end{tabular}}
+\end{table}

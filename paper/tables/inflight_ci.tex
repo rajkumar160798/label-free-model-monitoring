@@ -1,0 +1,17 @@
+\begin{table}[h]
+\centering
+\caption{In-flight book: MAE of the hazard variant minus MAE of each baseline (negative = ours better), with 95\% moving-block bootstrap intervals over quarters (block length 4, 2000 resamples). Bold: interval excludes zero.}
+\label{tab:inflight-ci}
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrr}
+\toprule
+Experiment & Metric & vs.\ complete cohort & vs.\ labels to date & vs.\ CBPE & vs.\ DA-CBPE \\
+\midrule
+freddie\_2007 & default rate & \textbf{-0.0034 [-0.0076, -0.0004]} & \textbf{-0.0038 [-0.0049, -0.0025]} & \textbf{-0.0070 [-0.0105, -0.0041]} & -0.0013 [-0.0045, +0.0013] \\
+freddie\_2007 & AUC & \textbf{-0.0220 [-0.0322, -0.0137]} & \textbf{-0.0058 [-0.0126, -0.0001]} & \textbf{-0.0130 [-0.0252, -0.0033]} & -0.0031 [-0.0072, +0.0001] \\
+freddie\_2016 & default rate & -0.0025 [-0.0082, +0.0012] & \textbf{-0.0029 [-0.0036, -0.0019]} & \textbf{-0.0069 [-0.0130, -0.0025]} & \textbf{-0.0045 [-0.0103, -0.0009]} \\
+freddie\_2016 & AUC & -0.0032 [-0.0164, +0.0104] & +0.0041 [-0.0056, +0.0114] & \textbf{-0.0411 [-0.0654, -0.0219]} & \textbf{-0.0134 [-0.0224, -0.0068]} \\
+\bottomrule
+\end{tabular}}
+\end{table}
