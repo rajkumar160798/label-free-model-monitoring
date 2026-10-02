@@ -195,10 +195,17 @@ Before submission:
 - author line reads "Raj KumarMyakala" (check spacing); add affiliation;
 - pick a venue and apply its template and page limit.
 
+## Packaging (2026-10-02)
+
+- PyPI name `lfmm` (free as of 2026-10-02). Core deps: numpy, pandas, polars, pyarrow, scikit-learn, scipy. Extras: `data` (folktables, pyreadstat, requests), `streaming` (river), `all`.
+- Tested from the built wheel in clean environments: Python 3.10 with the minimum versions (numpy 1.24, pandas 2.0, scikit-learn 1.4, scipy 1.10, polars 1.0, pyarrow 14), and Python 3.13 with the latest versions and all extras. README code blocks run on both.
+- `pytest` skips 6 slow tests by default (`-m slow` runs them). CI: `.github/workflows/tests.yml`.
+- Publishing: `.github/workflows/publish.yml` publishes on a GitHub release via PyPI trusted publishing (no token). One-time PyPI setup needed by the account owner.
+
 ## Next steps
 
-1. Release: push to GitHub (MIT license added), publish to PyPI, leaderboard site from `leaderboard/`.
+1. Release: publish v0.1.0 to PyPI (package ready, see "Packaging" below), leaderboard site from `leaderboard/`, arXiv upload bundle.
 2. Detection and retraining over several seeds (estimation already has 5).
 3. Calibrated alarm thresholds (held-out reference periods) instead of rules of thumb.
 4. Regression support, to add the five TabReD regression datasets.
-5. Faster tests: the hazard tests take ~25 min under load; shrink their synthetic streams.
+5. Faster slow tests: `pytest -m slow` (hazard and synthetic-shock checks) takes ~25 min under load.
