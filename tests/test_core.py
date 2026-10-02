@@ -99,6 +99,7 @@ def natural_delay_stream(n_months=60, per_month=3000, shock_month=36, shock=1.5,
     return Stream("natural", pd.DataFrame({"x": x}), y, event_time, label_time)
 
 
+@pytest.mark.slow
 def test_delay_adjusted_cbpe_sees_concept_shift_before_cohorts_complete():
     from lfmm.estimators import CBPE, DelayAdjustedCBPE, LatestCompleteCohort
 
@@ -113,6 +114,7 @@ def test_delay_adjusted_cbpe_sees_concept_shift_before_cohorts_complete():
     assert err["da_cbpe"] < 0.5 * err["latest_complete_cohort"], err
 
 
+@pytest.mark.slow
 def test_inflight_posterior_beats_ignoring_or_trusting_early_labels():
     from lfmm.estimators import CBPE, DelayAdjustedCBPE, LabelsToDate
     from lfmm.harness import run_inflight
@@ -152,6 +154,7 @@ def calendar_shock_stream(n_months=72, per_month=3000, burst=(40, 44), burst_haz
     return Stream("calendar", pd.DataFrame({"x": x}), y, event_time, label_time)
 
 
+@pytest.mark.slow
 @pytest.mark.xfail(reason="known limitation: a calendar-time burst of extra defaults (e.g. COVID "
                           "forbearance) is read as a lasting shift; needs an age-period hazard model",
                    strict=True)
@@ -165,6 +168,7 @@ def test_delay_adjusted_cbpe_does_not_overshoot_after_calendar_burst():
     assert err["da_cbpe"] <= err["latest_complete_cohort"], err
 
 
+@pytest.mark.slow
 def test_hazard_cbpe_handles_calendar_burst():
     from lfmm.estimators import HazardAdjustedCBPE, LatestCompleteCohort
 
@@ -175,6 +179,7 @@ def test_hazard_cbpe_handles_calendar_burst():
     assert err["da_cbpe_hz"] <= err["latest_complete_cohort"], err
 
 
+@pytest.mark.slow
 def test_hazard_cbpe_keeps_lasting_shift_accuracy():
     from lfmm.estimators import DelayAdjustedCBPE, HazardAdjustedCBPE
 
@@ -185,6 +190,7 @@ def test_hazard_cbpe_keeps_lasting_shift_accuracy():
     assert err["da_cbpe_hz"] <= 1.3 * err["da_cbpe"], err
 
 
+@pytest.mark.slow
 def test_hazard_cbpe_without_calendar_terms_matches_delay_adjusted():
     """With no kappa the hazard likelihood is the delay-adjusted one: same offsets."""
     from lfmm.estimators import DelayAdjustedCBPE, HazardAdjustedCBPE

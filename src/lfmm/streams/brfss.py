@@ -63,7 +63,10 @@ CATEGORICAL = ["state", "sex", "race", "smoker", "active", "marital", "employ", 
 
 
 def _read_year(year: int, data_dir=None) -> pl.DataFrame:
-    import pyreadstat
+    try:
+        import pyreadstat
+    except ImportError as exc:  # optional dependency
+        raise ImportError("Reading BRFSS needs 'pyreadstat': pip install 'lfmm[data]'") from exc
 
     zpath = raw_dir(data_dir) / "brfss" / f"LLCP{year}XPT.zip"
     with zipfile.ZipFile(zpath) as z, tempfile.TemporaryDirectory() as tmp:

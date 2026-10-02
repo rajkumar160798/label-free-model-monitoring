@@ -74,6 +74,7 @@ def test_run_detection_end_to_end():
 
 
 def test_adwin_scores_detects_mean_shift():
+    pytest.importorskip("river")
     rng = np.random.default_rng(0)
     det = ADWINScores().fit(None, rng.random(4000), None)
     assert not det.score(None, rng.random(4000), EMPTY)[1]
@@ -81,6 +82,7 @@ def test_adwin_scores_detects_mean_shift():
 
 
 def test_adwin_errors_only_sees_arrived_labels():
+    pytest.importorskip("river")
     rng = np.random.default_rng(0)
     p_ref = rng.random(4000)
     det = ADWINErrors().fit(None, p_ref, (rng.random(4000) < p_ref).astype(float))

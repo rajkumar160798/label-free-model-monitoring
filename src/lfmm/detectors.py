@@ -25,6 +25,20 @@ from sklearn.metrics import roc_auc_score
 from .estimators import Estimator, History, degradation
 
 
+def _adwin(delta: float):
+    try:
+        from river.drift import ADWIN
+    except ImportError as exc:  # optional dependency
+        raise ImportError("ADWIN detectors need the 'river' package: pip install 'lfmm[streaming]'") from exc
+    return ADWIN(delta=delta)
+
+
+def _has_river() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("river") is not None
+
+
 class Detector:
     name = "base"
 
@@ -251,10 +265,8 @@ class ADWINScores(Detector):
         self.delta, self.per_batch = delta, per_batch
 
     def fit(self, X_ref, proba_ref, y_ref, threshold=0.5):
-        from river.drift import ADWIN
-
         super().fit(X_ref, proba_ref, y_ref, threshold)
-        self.adwin = ADWIN(delta=self.delta)
+        self.adwin = _adwin(self.delta)
         for v in proba_ref[:: max(1, len(proba_ref) // self.per_batch)]:
             self.adwin.update(float(v))
         self.ref_mean = float(proba_ref.mean())
@@ -280,10 +292,8 @@ class ADWINErrors(Detector):
         self.delta, self.per_batch = delta, per_batch
 
     def fit(self, X_ref, proba_ref, y_ref, threshold=0.5):
-        from river.drift import ADWIN
-
         super().fit(X_ref, proba_ref, y_ref, threshold)
-        self.adwin = ADWIN(delta=self.delta)
+        self.adwin = _adwin(self.delta)
         err = (y_ref - proba_ref) ** 2
         for v in err[:: max(1, len(err) // self.per_batch)]:
             self.adwin.update(float(v))
@@ -331,7 +341,7 @@ def default_detectors(metric: str, delta: float, freq: str = "M") -> list[Detect
 
     return [
         UnivariateTests(), PSI(), ScoreKS(), DomainClassifier(), MMD(),
-        ADWINScores(), ADWINErrors(),
+        *([ADWINScores(), ADWINErrors()] if _has_river() else []),
         EstimatorAlarm(CBPE(), metric, delta),
         EstimatorAlarm(DelayAdjustedCBPE(), metric, delta),
         EstimatorAlarm(LatestCompleteCohort(freq=freq), metric, delta),
@@ -344,7 +354,7 @@ def detectors_for_events(events: dict, freq: str = "M") -> list[Detector]:
     from .estimators import CBPE, DelayAdjustedCBPE, LatestCompleteCohort, RecentArrivals
 
     dets: list[Detector] = [UnivariateTests(), PSI(), ScoreKS(), DomainClassifier(), MMD(permutations=100),
-                            ADWINScores(), ADWINErrors()]
+                            *([ADWINScores(), ADWINErrors()] if _has_river() else [])]
     for metric, (_, alarm_delta) in events.items():
         dets += [EstimatorAlarm(est, metric, alarm_delta) for est in
                  (CBPE(), DelayAdjustedCBPE(), LatestCompleteCohort(freq=freq), RecentArrivals())]

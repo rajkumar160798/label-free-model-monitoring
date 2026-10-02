@@ -35,7 +35,7 @@ def _years(text: str | None, default: list[int]) -> list[int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m lfmm.download", description=__doc__,
+    p = argparse.ArgumentParser(prog="lfmm-download", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("dataset", choices=["acs", "tlc", "brfss", "sflld", "tabred", "all"])
     p.add_argument("--data-dir", help="overrides $LFMM_DATA_DIR")
