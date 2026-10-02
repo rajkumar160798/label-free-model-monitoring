@@ -1,0 +1,7 @@
+detector,periods,spearman,auroc@0.02,auroc@0.05,auroc@0.1,event_rate,alarm_rate,precision,recall,false_alarm_rate
+univariate_tests,8,1.0,,1.0,1.0,0.75,1.0,0.75,1.0,1.0
+psi_max,8,1.0,,1.0,1.0,0.75,0.0,,0.0,0.0
+latest_complete_cohort:prevalence,8,1.0,,1.0,1.0,0.75,0.625,1.0,0.8333333333333334,0.0
+domain_classifier,8,0.9523809523809524,,1.0,1.0,0.75,0.75,1.0,1.0,0.0
+score_ks,8,0.9285714285714287,,1.0,1.0,0.75,1.0,0.75,1.0,1.0
+cbpe:prevalence,8,0.9285714285714287,,1.0,1.0,0.75,0.0,,0.0,0.0

@@ -1,0 +1,26 @@
+[project]
+name = "lfmm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Raj_Myakala", email = "Rajuricky70@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "folktables>=0.0.12",
+    "pandas>=3.0.6",
+    "polars>=1.44.2",
+    "pyarrow>=25.0.1",
+    "requests>=2.34.2",
+    "scikit-learn>=1.9.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
