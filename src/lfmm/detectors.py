@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2_contingency, ks_2samp
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.model_selection import cross_val_predict
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.metrics import roc_auc_score
 
 from .estimators import Estimator, History, degradation
@@ -166,15 +166,142 @@ class DomainClassifier(Detector):
         return X.iloc[np.sort(self.rng.choice(len(X), self.max_rows, replace=False))]
 
     def score(self, X, proba, history):
-        from .harness import _model_features
+        from .harness import _model_features, usable_columns
 
         both = pd.concat([self._sample(self.X_ref), self._sample(X)], ignore_index=True)
+        both = _model_features(both)
+        # Each CV fold must see some values of every column (all-missing breaks the binning).
+        both = both[[c for c in usable_columns(both) if both[c].notna().sum() >= 10]]
         label = np.r_[np.zeros(min(len(self.X_ref), self.max_rows)), np.ones(min(len(X), self.max_rows))]
         clf = HistGradientBoostingClassifier(max_iter=100, categorical_features="from_dtype",
                                              random_state=self.seed)
-        p = cross_val_predict(clf, _model_features(both), label, cv=3, method="predict_proba")[:, 1]
+        folds = StratifiedKFold(3, shuffle=True, random_state=self.seed)
+        p = cross_val_predict(clf, both, label, cv=folds, method="predict_proba")[:, 1]
         auc = roc_auc_score(label, p)
         return float(auc), auc > self.alarm_at
+
+
+class MMD(Detector):
+    """Kernel two-sample test (Gretton et al., 2012) on numeric features plus the model score.
+
+    Features are standardized with reference statistics (missing -> reference
+    median); RBF bandwidth by the median heuristic on the reference. Score is the
+    unbiased MMD^2; alarm when the permutation p-value is below ``alpha``.
+    """
+    name = "mmd"
+
+    def __init__(self, alpha: float = 0.05, n: int = 1000, permutations: int = 200, seed: int = 0):
+        self.alpha, self.n, self.permutations = alpha, n, permutations
+        self.rng = np.random.default_rng(seed)
+
+    def _matrix(self, X: pd.DataFrame, proba: np.ndarray) -> np.ndarray:
+        num = X[self.cols].to_numpy(dtype=float)
+        num = np.where(np.isnan(num), self.median, num)
+        return np.column_stack([(num - self.mean) / self.std, (proba - self.p_mean) / self.p_std])
+
+    def fit(self, X_ref, proba_ref, y_ref, threshold=0.5):
+        super().fit(X_ref, proba_ref, y_ref, threshold)
+        self.cols = [c for c in X_ref.columns if not _is_cat(X_ref[c]) and X_ref[c].notna().any()]
+        num = X_ref[self.cols].to_numpy(dtype=float)
+        self.median = np.nanmedian(num, axis=0)
+        self.mean = np.nanmean(num, axis=0)
+        self.std = np.nanstd(num, axis=0) + 1e-9
+        self.p_mean, self.p_std = proba_ref.mean(), proba_ref.std() + 1e-9
+        self.Z_ref = self._sample(self._matrix(X_ref, proba_ref))
+        d = np.sum((self.Z_ref[:300, None, :] - self.Z_ref[None, :300, :]) ** 2, axis=-1)
+        self.gamma = 1.0 / np.median(d[d > 0])
+        return self
+
+    def _sample(self, Z):
+        return Z if len(Z) <= self.n else Z[self.rng.choice(len(Z), self.n, replace=False)]
+
+    @staticmethod
+    def _mmd2(K, idx_a, idx_b):
+        kaa = K[np.ix_(idx_a, idx_a)]
+        kbb = K[np.ix_(idx_b, idx_b)]
+        m, n = len(idx_a), len(idx_b)
+        return ((kaa.sum() - np.trace(kaa)) / (m * (m - 1)) + (kbb.sum() - np.trace(kbb)) / (n * (n - 1))
+                - 2 * K[np.ix_(idx_a, idx_b)].mean())
+
+    def score(self, X, proba, history):
+        Z = np.vstack([self.Z_ref, self._sample(self._matrix(X, proba))])
+        sq = np.sum(Z ** 2, axis=1)
+        K = np.exp(-self.gamma * np.clip(sq[:, None] + sq[None, :] - 2 * Z @ Z.T, 0, None))
+        m = len(self.Z_ref)
+        idx = np.arange(len(Z))
+        stat = self._mmd2(K, idx[:m], idx[m:])
+        null = []
+        for _ in range(self.permutations):
+            perm = self.rng.permutation(len(Z))
+            null.append(self._mmd2(K, perm[:m], perm[m:]))
+        p = (1 + np.sum(np.array(null) >= stat)) / (1 + self.permutations)
+        return float(stat), p < self.alpha
+
+
+class ADWINScores(Detector):
+    """ADWIN (Bifet & Gavalda, 2007) on the stream of model scores. Label-free.
+
+    Stateful: batches must arrive in time order. Up to ``per_batch`` scores per
+    batch are fed in order. Score is how far ADWIN's current window mean is from
+    the reference mean; alarm if ADWIN signalled a change during the batch.
+    """
+    name = "adwin_scores"
+
+    def __init__(self, delta: float = 0.002, per_batch: int = 2000):
+        self.delta, self.per_batch = delta, per_batch
+
+    def fit(self, X_ref, proba_ref, y_ref, threshold=0.5):
+        from river.drift import ADWIN
+
+        super().fit(X_ref, proba_ref, y_ref, threshold)
+        self.adwin = ADWIN(delta=self.delta)
+        for v in proba_ref[:: max(1, len(proba_ref) // self.per_batch)]:
+            self.adwin.update(float(v))
+        self.ref_mean = float(proba_ref.mean())
+        return self
+
+    def score(self, X, proba, history):
+        detected = False
+        for v in proba[:: max(1, len(proba) // self.per_batch)]:
+            self.adwin.update(float(v))
+            detected |= self.adwin.drift_detected
+        return abs(self.adwin.estimation - self.ref_mean), detected
+
+
+class ADWINErrors(Detector):
+    """ADWIN on the squared error of predictions whose labels have just arrived.
+
+    The usual way ADWIN is deployed: it only sees labels as they arrive, so under
+    label delay it reacts late, and to early-arriving labels first.
+    """
+    name = "adwin_errors"
+
+    def __init__(self, delta: float = 0.002, per_batch: int = 2000):
+        self.delta, self.per_batch = delta, per_batch
+
+    def fit(self, X_ref, proba_ref, y_ref, threshold=0.5):
+        from river.drift import ADWIN
+
+        super().fit(X_ref, proba_ref, y_ref, threshold)
+        self.adwin = ADWIN(delta=self.delta)
+        err = (y_ref - proba_ref) ** 2
+        for v in err[:: max(1, len(err) // self.per_batch)]:
+            self.adwin.update(float(v))
+        self.ref_mean = float(err.mean())
+        self.last_now = None
+        return self
+
+    def score(self, X, proba, history):
+        known = ~np.isnan(history.y_known)
+        new = known if self.last_now is None else known & (history.label_time > self.last_now)
+        self.last_now = history.now
+        idx = np.flatnonzero(new)
+        idx = idx[np.argsort(history.label_time[idx], kind="stable")]
+        detected = False
+        for i in idx[:: max(1, len(idx) // self.per_batch)]:
+            self.adwin.update(float((history.y_known[i] - history.proba[i]) ** 2))
+            detected |= self.adwin.drift_detected
+        return abs(self.adwin.estimation - self.ref_mean), detected
 
 
 class EstimatorAlarm(Detector):
@@ -200,11 +327,25 @@ class EstimatorAlarm(Detector):
 
 
 def default_detectors(metric: str, delta: float, freq: str = "M") -> list[Detector]:
-    from .estimators import CBPE, LatestCompleteCohort, RecentArrivals
+    from .estimators import CBPE, DelayAdjustedCBPE, LatestCompleteCohort, RecentArrivals
 
     return [
-        UnivariateTests(), PSI(), ScoreKS(), DomainClassifier(),
+        UnivariateTests(), PSI(), ScoreKS(), DomainClassifier(), MMD(),
+        ADWINScores(), ADWINErrors(),
         EstimatorAlarm(CBPE(), metric, delta),
+        EstimatorAlarm(DelayAdjustedCBPE(), metric, delta),
         EstimatorAlarm(LatestCompleteCohort(freq=freq), metric, delta),
         EstimatorAlarm(RecentArrivals(), metric, delta),
     ]
+
+
+def detectors_for_events(events: dict, freq: str = "M") -> list[Detector]:
+    """Input/output drift detectors once, plus estimator alarms for each event metric."""
+    from .estimators import CBPE, DelayAdjustedCBPE, LatestCompleteCohort, RecentArrivals
+
+    dets: list[Detector] = [UnivariateTests(), PSI(), ScoreKS(), DomainClassifier(), MMD(permutations=100),
+                            ADWINScores(), ADWINErrors()]
+    for metric, (_, alarm_delta) in events.items():
+        dets += [EstimatorAlarm(est, metric, alarm_delta) for est in
+                 (CBPE(), DelayAdjustedCBPE(), LatestCompleteCohort(freq=freq), RecentArrivals())]
+    return dets

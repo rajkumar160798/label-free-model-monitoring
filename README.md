@@ -30,5 +30,45 @@ Downloads resume after an interruption and skip files already present. Each file
 ```bash
 uv run python scripts/run_estimation.py     # performance-estimation experiments -> results/
 uv run python scripts/run_detection.py      # degradation-detection experiments -> results/detection_*
+uv run python scripts/run_inflight.py       # in-flight book estimation (natural label delay) -> results/inflight_*
+uv run python scripts/run_retrain.py        # retrain-or-not task (slow: one model per period) -> results/retrain_*
+uv run python scripts/make_figures.py       # figures/ from results/
 uv run pytest -q
 ```
+
+## Tasks
+
+| Task | Question | Scored by |
+|---|---|---|
+| Estimation (next batch) | What will this batch's metric turn out to be? | MAE vs the true metric, with block-bootstrap 95% intervals |
+| Estimation (in-flight book) | What is the metric of everything scored in the last N months, some of it already labeled? | same |
+| Detection | Has the model got worse than at deployment? | rank correlation with true degradation, AUROC, alarm precision/recall |
+| Retrain or not | Retrain now, given the labels that have arrived? | total loss + λ × retrains, regret vs the hindsight-optimal schedule |
+
+Monitors only ever see labels whose `label_time` has passed. Training uses only cohorts whose labels have (almost) all arrived.
+
+## Add your own method
+
+An estimator is fit on a labeled reference window, then asked for a metric on each new batch. It sees the batch's model scores and a `History` of earlier rows, holding only the labels that have arrived so far:
+
+```python
+import numpy as np
+from lfmm.estimators import Estimator, History, metric_value
+from lfmm.experiments import EXPERIMENTS
+from lfmm.harness import run_estimation
+
+class MeanScore(Estimator):
+    """Toy example: the average model score as the positive rate."""
+    name = "mean_score"
+    supports = ("prevalence",)
+
+    def estimate(self, metric: str, proba: np.ndarray, history: History) -> float:
+        return float(proba.mean())
+
+exp = EXPERIMENTS["freddie_2007"]
+result = run_estimation(exp.load(), metrics=("prevalence",), estimators=[MeanScore()],
+                        **exp.deploy_kwargs())
+print(result.bootstrap_mae("prevalence"))
+```
+
+Detectors follow the same pattern (`lfmm.detectors.Detector`: `fit` on the reference window, `score` returns `(drift_score, alarm)`), as do retraining policies (`lfmm.retrain.Policy`).

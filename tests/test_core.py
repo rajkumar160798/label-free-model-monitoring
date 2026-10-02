@@ -79,3 +79,48 @@ def test_no_label_leaks_into_history():
 
     run_estimation(s, "2021-03-01", freq="M", estimators=[Spy()])
     assert seen and all(seen)
+
+
+def natural_delay_stream(n_months=60, per_month=3000, shock_month=36, shock=1.5, horizon_days=720, seed=0):
+    """Concept shift with credit-style label arrival.
+
+    At ``shock_month`` the intercept jumps (same features, many more positives).
+    Positives become known when the event happens (uniform over the horizon);
+    negatives only once the horizon has passed.
+    """
+    rng = np.random.default_rng(seed)
+    month = np.repeat(np.arange(n_months), per_month)
+    x = rng.normal(0, 1, len(month))
+    logit = -3.0 + 1.2 * x + shock * (month >= shock_month)
+    y = (rng.random(len(month)) < 1 / (1 + np.exp(-logit))).astype(float)
+    event_time = (np.datetime64("2010-01-01", "M") + month).astype("datetime64[ns]")
+    delay_days = np.where(y == 1, rng.integers(30, horizon_days, len(month)), horizon_days)
+    label_time = event_time + delay_days.astype("timedelta64[D]")
+    return Stream("natural", pd.DataFrame({"x": x}), y, event_time, label_time)
+
+
+def test_delay_adjusted_cbpe_sees_concept_shift_before_cohorts_complete():
+    from lfmm.estimators import CBPE, DelayAdjustedCBPE, LatestCompleteCohort
+
+    s = natural_delay_stream()
+    res = run_estimation(s, "2012-07-01", freq="Q", metrics=("prevalence",),
+                         estimators=[CBPE(), DelayAdjustedCBPE(), LatestCompleteCohort(freq="M")])
+    w = res.wide("prevalence")
+    after = w.loc[[p for p in w.index if p >= "2013Q2"]]  # shock hit at 2013-01; ~1 quarter later
+    err = (after[["cbpe", "da_cbpe", "latest_complete_cohort"]].sub(after["truth"], axis=0)).abs().mean()
+    # CBPE cannot see a pure concept shift; the complete-cohort baseline is ~2 years late
+    assert err["da_cbpe"] < 0.5 * err["cbpe"], err
+    assert err["da_cbpe"] < 0.5 * err["latest_complete_cohort"], err
+
+
+def test_inflight_posterior_beats_ignoring_or_trusting_early_labels():
+    from lfmm.estimators import CBPE, DelayAdjustedCBPE, LabelsToDate
+    from lfmm.harness import run_inflight
+
+    s = natural_delay_stream()
+    res = run_inflight(s, "2012-07-01", freq="Q", book_months=24, metrics=("prevalence",),
+                       estimators=[CBPE(), DelayAdjustedCBPE(), LabelsToDate()])
+    summ = res.summary().loc["prevalence"]
+    assert summ.loc["da_cbpe", "mae"] < 0.5 * summ.loc["cbpe", "mae"], summ
+    assert summ.loc["da_cbpe", "mae"] < 0.5 * summ.loc["labels_to_date", "mae"], summ
+    assert summ.loc["labels_to_date", "bias"] < 0  # counting pending labels as negative

@@ -44,6 +44,17 @@ def _model_features(X: pd.DataFrame, max_categories: int = 250) -> pd.DataFrame:
     return X
 
 
+def usable_columns(X: pd.DataFrame) -> list[str]:
+    """Columns a model can be fit on: numeric ones need at least two distinct values
+    (HistGradientBoosting's binning fails otherwise), categoricals at least one."""
+    keep = []
+    for c in X.columns:
+        n = X[c].nunique(dropna=True)
+        if n >= 2 or (isinstance(X[c].dtype, pd.CategoricalDtype) and n >= 1):
+            keep.append(c)
+    return keep
+
+
 def trainable_mask(stream: Stream, train_end, freq: str, min_coverage: float = 0.95) -> np.ndarray:
     """Rows in cohorts before train_end whose labels had (almost) all arrived by train_end."""
     now = np.datetime64(pd.Timestamp(train_end), "ns")
@@ -84,24 +95,30 @@ class Deployment:
         ok = ~np.isnan(y)
         return metric_value(metric, y[ok], self.proba[batch.mask][ok], self.threshold)
 
-    def batches(self) -> Iterator[Batch]:
+    def periods(self) -> list[pd.Period]:
+        """Deployment periods: those starting at or after train_end."""
         s = self.stream
-        periods = s.periods(self.freq)
-        now0 = np.datetime64(self.train_end, "ns")
-        resolved = ~np.isnan(s.y)
-        for p in periods[s.event_time >= now0].unique().sort_values():
-            in_batch = np.asarray(periods == p)
-            now = np.datetime64(p.end_time.floor("D"), "ns")
-            past = s.event_time < np.datetime64(p.start_time, "ns")
-            known = s.known_by(now)[past]
-            history = History(
-                proba=self.proba[past],
-                y_known=np.where(known, s.y[past], np.nan),
-                event_time=s.event_time[past],
-                label_time=np.where(known, s.label_time[past], np.datetime64("NaT", "ns")),
-                now=now,
-            )
-            yield Batch(p, in_batch, history, float(resolved[in_batch].mean()))
+        return list(s.periods(self.freq)[s.event_time >= np.datetime64(self.train_end, "ns")]
+                    .unique().sort_values())
+
+    def batch(self, p: pd.Period) -> Batch:
+        s = self.stream
+        in_batch = np.asarray(s.periods(self.freq) == p)
+        now = np.datetime64(p.end_time.floor("D"), "ns")
+        past = s.event_time < np.datetime64(p.start_time, "ns")
+        known = s.known_by(now)[past]
+        history = History(
+            proba=self.proba[past],
+            y_known=np.where(known, s.y[past], np.nan),
+            event_time=s.event_time[past],
+            label_time=np.where(known, s.label_time[past], np.datetime64("NaT", "ns")),
+            now=now,
+        )
+        return Batch(p, in_batch, history, float((~np.isnan(s.y[in_batch])).mean()))
+
+    def batches(self) -> Iterator[Batch]:
+        for p in self.periods():
+            yield self.batch(p)
 
     def info(self, metrics) -> dict:
         t = self.stream.event_time
@@ -112,8 +129,11 @@ class Deployment:
 
 
 def deploy(stream: Stream, train_end, freq: str = "Q", ref_months: int = 12, model=None,
-           train_start=None, max_train_rows: int | None = 500_000, threshold: float = 0.5,
+           train_start=None, train_window_months: int | None = None,
+           max_train_rows: int | None = 500_000, threshold: float = 0.5,
            seed: int = 0) -> Deployment:
+    """Train at ``train_end`` on fully labeled cohorts, optionally only those
+    after ``train_start`` or within the last ``train_window_months`` of them."""
     train_end = pd.Timestamp(train_end)
     model = model if model is not None else default_model(seed)
     rng = np.random.default_rng(seed)
@@ -121,6 +141,9 @@ def deploy(stream: Stream, train_end, freq: str = "Q", ref_months: int = 12, mod
     mask = trainable_mask(stream, train_end, freq)
     if train_start is not None:
         mask &= stream.event_time >= np.datetime64(pd.Timestamp(train_start), "ns")
+    if train_window_months is not None and mask.any():
+        newest = stream.event_time[mask].max()
+        mask &= stream.event_time > newest - np.timedelta64(train_window_months * 30, "D")
     idx = np.flatnonzero(mask)
     if len(idx) == 0:
         raise ValueError("no fully labeled cohorts before train_end")
@@ -133,12 +156,26 @@ def deploy(stream: Stream, train_end, freq: str = "Q", ref_months: int = 12, mod
         fit_idx = np.sort(rng.choice(fit_idx, max_train_rows, replace=False))
 
     X = _model_features(stream.X)
+    # A feature that is missing or constant at training time (e.g. a field added
+    # later) cannot be learned from; drop it rather than crash the binning.
+    X = X[usable_columns(X.iloc[fit_idx])]
     model.fit(X.iloc[fit_idx], stream.y[fit_idx])
     proba = model.predict_proba(X)[:, 1]
     return Deployment(stream, train_end, freq, proba, fit_idx, ref_idx, threshold)
 
 
 # --- Task 1: performance estimation -------------------------------------------
+
+def _block_bootstrap(e: pd.DataFrame, n_boot: int, block: int, seed: int) -> np.ndarray:
+    """Means of ``e``'s columns over moving-block resamples of its rows."""
+    rng = np.random.default_rng(seed)
+    x = e.to_numpy(dtype=float)
+    n = len(x)
+    block = max(1, min(block, n))
+    n_blocks = int(np.ceil(n / block))
+    starts = rng.integers(0, n - block + 1, size=(n_boot, n_blocks))
+    idx = (starts[:, :, None] + np.arange(block)).reshape(n_boot, -1)[:, :n]
+    return np.nanmean(x[idx], axis=1)
 
 @dataclass
 class Result:
@@ -157,6 +194,32 @@ class Result:
             periods=("err", "size"),
         )
         return out.sort_values(["metric", "mae"])
+
+    def _errors(self, metric: str) -> pd.DataFrame:
+        """Absolute error per period (rows) and estimator (columns), complete periods only."""
+        r = self.records[self.records["metric"] == metric].dropna(subset=["truth"])
+        err = (r["estimate"] - r["truth"]).abs()
+        return r.assign(err=err).pivot(index="period", columns="estimator", values="err").sort_index()
+
+    def bootstrap_mae(self, metric: str, n_boot: int = 2000, block: int = 4, seed: int = 0) -> pd.DataFrame:
+        """MAE with a 95% moving-block bootstrap interval over periods.
+
+        Blocks of ``block`` consecutive periods keep the autocorrelation of
+        errors (a shock affects several periods in a row).
+        """
+        e = self._errors(metric).dropna(axis=1, how="all")
+        boots = _block_bootstrap(e, n_boot, block, seed)
+        return pd.DataFrame({"mae": e.mean(), "lo": np.nanpercentile(boots, 2.5, axis=0),
+                             "hi": np.nanpercentile(boots, 97.5, axis=0)}).sort_values("mae")
+
+    def compare(self, metric: str, a: str, b: str, n_boot: int = 2000, block: int = 4,
+                seed: int = 0) -> dict:
+        """MAE(a) - MAE(b) with a 95% block-bootstrap interval (negative = a is better)."""
+        e = self._errors(metric)[[a, b]].dropna()
+        d = (e[a] - e[b]).to_frame("d")
+        boots = _block_bootstrap(d, n_boot, block, seed)[:, 0]
+        return {"diff": float(d["d"].mean()), "lo": float(np.percentile(boots, 2.5)),
+                "hi": float(np.percentile(boots, 97.5)), "periods": len(d)}
 
     def wide(self, metric: str) -> pd.DataFrame:
         r = self.records[self.records["metric"] == metric]
@@ -193,6 +256,51 @@ def run_estimation(
                 rows.append({"period": str(b.period), "metric": m, "estimator": est.name,
                              "estimate": value, "truth": truth, "n": int(b.mask.sum()),
                              "label_coverage": b.label_coverage})
+    return Result(stream.name, dep.train_end, pd.DataFrame(rows), dep.info(metrics))
+
+
+def run_inflight(
+    stream: Stream,
+    train_end,
+    freq: str = "Q",
+    book_months: int = 24,
+    metrics: tuple[str, ...] = ("prevalence", "roc_auc"),
+    estimators: list[Estimator] | None = None,
+    min_truth_coverage: float = 0.9,
+    deployment: Deployment | None = None,
+    **deploy_kwargs,
+) -> Result:
+    """Task 1b: estimate the metric of the in-flight book at each period end.
+
+    The book is every row scored in the last ``book_months`` before the current
+    period. Some of its labels have arrived (early ones, e.g. defaults); the rest
+    are pending. For long-horizon labels this is the question monitoring can
+    actually answer: a new batch's eventual outcome depends on events that have
+    not happened yet.
+    """
+    dep = deployment or deploy(stream, train_end, freq, **deploy_kwargs)
+    estimators = estimators if estimators is not None else default_estimators(freq="M")
+    for est in estimators:
+        est.fit(dep.proba[dep.ref_idx], stream.y[dep.ref_idx], dep.threshold)
+    window = np.timedelta64(book_months * 30, "D")
+
+    rows = []
+    for b in dep.batches():
+        past_idx = np.flatnonzero(stream.event_time < np.datetime64(b.period.start_time, "ns"))
+        target = b.history.event_time > b.history.now - window
+        idx = past_idx[target]
+        y = stream.y[idx]
+        coverage = float((~np.isnan(y)).mean()) if len(y) else 0.0
+        arrived = float((~np.isnan(b.history.y_known[target])).mean()) if len(y) else 0.0
+        for m in metrics:
+            ok = ~np.isnan(y)
+            truth = (metric_value(m, y[ok], dep.proba[idx][ok], dep.threshold)
+                     if coverage >= min_truth_coverage else np.nan)
+            for est in estimators:
+                value = est.estimate_inflight(m, b.history, target) if m in est.supports else np.nan
+                rows.append({"period": str(b.period), "metric": m, "estimator": est.name,
+                             "estimate": value, "truth": truth, "n": int(target.sum()),
+                             "label_coverage": coverage, "arrived_share": arrived})
     return Result(stream.name, dep.train_end, pd.DataFrame(rows), dep.info(metrics))
 
 
@@ -236,6 +344,50 @@ class DetectionResult:
         return pd.DataFrame(out).set_index("detector").sort_values("spearman", ascending=False)
 
 
+def run_detection_events(
+    stream: Stream,
+    train_end,
+    detectors: list,
+    events: dict[str, tuple[tuple[float, ...], float]],
+    freq: str = "Q",
+    min_truth_coverage: float = 0.9,
+    deployment: Deployment | None = None,
+    **deploy_kwargs,
+) -> dict[str, DetectionResult]:
+    """Score every detector once per period, then against each event definition.
+
+    ``events`` maps a metric to (deltas scored by AUROC, delta used for alarms).
+    Running the detectors once and reusing their output for every event is much
+    cheaper than one run per metric (the slow detectors don't depend on the metric).
+    """
+    dep = deployment or deploy(stream, train_end, freq, **deploy_kwargs)
+    ref_rows = dep.ref_idx
+    X_ref = stream.X.iloc[ref_rows].reset_index(drop=True)
+    for det in detectors:
+        det.fit(X_ref, dep.proba[ref_rows], stream.y[ref_rows], dep.threshold)
+    ref_values = {m: dep.ref_metric(m) for m in events}
+
+    rows = []
+    for b in dep.batches():
+        X_b = stream.X.loc[b.mask].reset_index(drop=True)
+        truths = {m: dep.truth(b, m, min_truth_coverage) for m in events}
+        for det in detectors:
+            score, alarm = det.score(X_b, dep.proba[b.mask], b.history)
+            for m, truth in truths.items():
+                deg = degradation(m, ref_values[m], truth) if not np.isnan(truth) else np.nan
+                rows.append({"metric": m, "period": str(b.period), "detector": det.name,
+                             "score": score, "alarm": bool(alarm), "truth": truth,
+                             "degradation": deg, "n": int(b.mask.sum()),
+                             "label_coverage": b.label_coverage})
+    records = pd.DataFrame(rows)
+    return {
+        m: DetectionResult(stream.name, dep.train_end,
+                           records[records["metric"] == m].drop(columns="metric").reset_index(drop=True),
+                           m, tuple(deltas), alarm_delta, dep.info((m,)))
+        for m, (deltas, alarm_delta) in events.items()
+    }
+
+
 def run_detection(
     stream: Stream,
     train_end,
@@ -248,23 +400,7 @@ def run_detection(
     deployment: Deployment | None = None,
     **deploy_kwargs,
 ) -> DetectionResult:
-    dep = deployment or deploy(stream, train_end, freq, **deploy_kwargs)
-    ref_rows = dep.ref_idx
-    X_ref = stream.X.iloc[ref_rows].reset_index(drop=True)
-    for det in detectors:
-        det.fit(X_ref, dep.proba[ref_rows], stream.y[ref_rows], dep.threshold)
-    ref_value = dep.ref_metric(event_metric)
-
-    rows = []
-    for b in dep.batches():
-        X_b = stream.X.loc[b.mask].reset_index(drop=True)
-        truth = dep.truth(b, event_metric, min_truth_coverage)
-        deg = degradation(event_metric, ref_value, truth) if not np.isnan(truth) else np.nan
-        for det in detectors:
-            score, alarm = det.score(X_b, dep.proba[b.mask], b.history)
-            rows.append({"period": str(b.period), "detector": det.name, "score": score,
-                         "alarm": bool(alarm), "truth": truth, "degradation": deg,
-                         "n": int(b.mask.sum()), "label_coverage": b.label_coverage})
-    return DetectionResult(stream.name, dep.train_end, pd.DataFrame(rows), event_metric,
-                           tuple(deltas), alarm_delta if alarm_delta is not None else deltas[1],
-                           dep.info((event_metric,)))
+    """Single-event version of ``run_detection_events``."""
+    alarm_delta = alarm_delta if alarm_delta is not None else deltas[1]
+    return run_detection_events(stream, train_end, detectors, {event_metric: (tuple(deltas), alarm_delta)},
+                                freq, min_truth_coverage, deployment, **deploy_kwargs)[event_metric]
